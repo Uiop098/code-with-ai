@@ -1111,7 +1111,7 @@ def file_actions_menu(path: str, provider, model, api_key, history):
     if choice == "1":
         handle_open(path)
     elif choice == "2":
-        handle_view_editor(path, provider, model, api_key, history)
+        handle_view_editor(path, provider, model, api_key, history, session=session)
     elif choice == "3":
         instructions = input("  Describe what this file should contain: ").strip()
         if instructions:
@@ -1285,10 +1285,13 @@ def handle_view_editor(farg: str, provider: dict, model: str, api_key: str, hist
                     if p.returncode != 0:
                         ans = input(f"\n[Command failed] Ask AI to analyze and fix the syntax error? [Y/n]: ")
                         if ans.lower() in ('', 'y', 'yes'):
+                            _prov = session.get("provider") if session else provider
+                            _mod = session.get("model") if session else model
+                            _key = session.get("api_key") if session else api_key
                             if session: ensure_ai_ready(session)
                             prompt = f"Executing {os.path.basename(path)} failed:\n\n{p.stderr}\n\nFix the error in this file.\nReturn ONLY the replacement script inside a markdown code block. Do not add outside chatter."
                             print("\nAsking AI for fix...")
-                            reply = send_message(session["provider"], session["model"], session["api_key"], [], prompt, silent=True, include_context=True)
+                            reply = send_message(_prov, _mod, _key, [], prompt, silent=True, include_context=True)
                             
                             if reply:
                                 extracted = extract_code_from_reply(reply)
@@ -1304,6 +1307,10 @@ def handle_view_editor(farg: str, provider: dict, model: str, api_key: str, hist
             input("\nPress Enter to return to editor...")
             
         elif res == "ai":
+            _prov = session.get("provider") if session else provider
+            _mod = session.get("model") if session else model
+            _key = session.get("api_key") if session else api_key
+            
             if session: ensure_ai_ready(session)
             instr = input(f"\n[AI] What do you want to change in {path}? ")
             if instr.strip():
@@ -1316,7 +1323,7 @@ def handle_view_editor(farg: str, provider: dict, model: str, api_key: str, hist
                     "Rewrite the file to apply these changes. Return ONLY valid text/code inside a SINGLE markdown block. Do not use diffs."
                 )
                 print("\nThinking...")
-                reply = send_message(session["provider"], session["model"], session["api_key"], [], prompt, silent=True, include_context=False)
+                reply = send_message(_prov, _mod, _key, [], prompt, silent=True, include_context=False)
                 if reply:
                     new_code = extract_code_from_reply(reply)
                     if new_code:
@@ -3069,7 +3076,7 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
         if not farg or farg in ["!find", "/", "\\/"]:
             farg = get_path_interactively() or ""
         if farg:
-            handle_view_editor(farg, prov, mod, key, hist)
+            handle_view_editor(farg, prov, mod, key, hist, session=session)
         return None
     if lower == "!!aieditor" or lower.startswith("!!aieditor ") or lower == "e/ai" or lower.startswith("e/ai "):
         prefix = "!!aieditor" if lower.startswith("!!aieditor") else "e/ai"
@@ -3077,7 +3084,7 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
         if not farg or farg in ["!find", "/", "\\/"]:
             farg = get_path_interactively() or ""
         if farg:
-            handle_view_editor(farg, prov, mod, key, hist, start_with_ai=True)
+            handle_view_editor(farg, prov, mod, key, hist, session=session, start_with_ai=True)
         return None
 
     # ── e-open: open a file (or pick one from a folder) directly in the editor ──
@@ -3093,7 +3100,7 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
             farg = input("  File to edit: ").strip()
             if not farg:
                 return None
-        handle_view_editor(farg, prov, mod, key, hist)
+        handle_view_editor(farg, prov, mod, key, hist, session=session)
         return None
 
     # ── AI explain / debug / check (eai-* inside the editor context, ai-* generally) ──
@@ -3225,7 +3232,7 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
         if not farg or farg in ["!find", "/", "\\/"]:
             farg = get_path_interactively() or ""
         if farg:
-            handle_view_editor(farg, prov, mod, key, hist)
+            handle_view_editor(farg, prov, mod, key, hist, session=session)
         return None
 
     # ── AI editing ────────────────────────────────────────────────────────────

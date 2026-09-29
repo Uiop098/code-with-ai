@@ -1256,11 +1256,11 @@ def handle_view_editor(farg: str, provider: dict, model: str, api_key: str, hist
             break
             
         elif res == "nano":
-            import os
+            # global os
             os.system(f"nano '{path}'")
             
         elif res == "run":
-            import os, subprocess, sys
+            # global
             print(f"\n> Running {path}...\n")
             ext = os.path.splitext(path)[1].lower()
             cmd = None
@@ -1376,7 +1376,7 @@ def handle_rename_copy(path: str):
                 attached_files[dest_full] = attached_files.pop(full)
             print(ok(f"  Renamed → {dest_full}\n"))
         elif op == "2":
-            import shutil
+            # global shutil
             shutil.copy2(full, dest_full)
             print(ok(f"  Copied → {dest_full}\n"))
     except OSError as e:
@@ -3477,7 +3477,7 @@ class CommandPaletteCompleter(Completer):
 
 
 def get_path_interactively(start_path="."):
-    import shutil
+    # global shutil
     current_dir = os.path.abspath(start_path)
     selected_idx = [0]
     entries = [[]]

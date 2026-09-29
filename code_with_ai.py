@@ -27,6 +27,19 @@ except ImportError:
     HAS_FLASK = False
 from datetime import datetime
 
+import prompt_toolkit
+from prompt_toolkit import prompt
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.application import Application
+from prompt_toolkit.layout.containers import Window, HSplit, VSplit
+from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.layout import Layout
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.styles import Style
+from prompt_toolkit.shortcuts import CompleteStyle
+from prompt_toolkit.formatted_text import ANSI
+
+
 # ─── Optional: readline for arrow-key history ─────────────────────────────────
 try:
     import readline
@@ -3017,20 +3030,26 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
             print(ok("  Back to the full command set.\n"))
         return None
     if lower == "!!editor" or lower.startswith("!!editor "):
-        farg = user_input[len("!!editor"):].strip() or input("  File path: ").strip()
+        farg = user_input[len("!!editor"):].strip()
+        if not farg or farg in ["!find", "/", "\\/"]:
+            farg = get_path_interactively() or ""
         if farg:
             handle_view_editor(farg, prov, mod, key, hist)
         return None
     if lower == "!!aieditor" or lower.startswith("!!aieditor ") or lower == "e/ai" or lower.startswith("e/ai "):
         prefix = "!!aieditor" if lower.startswith("!!aieditor") else "e/ai"
-        farg = user_input[len(prefix):].strip() or input("  File path: ").strip()
+        farg = user_input[len(prefix):].strip()
+        if not farg or farg in ["!find", "/", "\\/"]:
+            farg = get_path_interactively() or ""
         if farg:
             handle_view_editor(farg, prov, mod, key, hist, start_with_ai=True)
         return None
 
     # ── e-open: open a file (or pick one from a folder) directly in the editor ──
     if lower.startswith("e-open") :
-        farg = user_input[len("e-open"):].strip() or input("  File or folder: ").strip()
+        farg = user_input[len("e-open"):].strip()
+        if not farg or farg in ["!find", "/", "\\/"]:
+            farg = get_path_interactively() or ""
         if not farg:
             return None
         efull = resolve_path(farg)
@@ -3132,8 +3151,13 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
     # ── File & folder commands ───────────────────────────────────────────────
     if lower == "ai-pwd":
         print(f"  {c(BBLUE, os.getcwd())}\n"); return None
-    if lower.startswith("ai-cd ") or lower == "ai-cd":
-        handle_cd(user_input[6:].strip()); return None
+    arg = user_input[5:].strip()
+    if lower == "ai-cd" or arg in ["!find", "/", "\\/"]: # catch / and !find
+        p = get_path_interactively()
+        if p: handle_cd(p)
+        return None
+    if lower.startswith("ai-cd "):
+        handle_cd(arg); return None
     if lower.startswith("ai-mkdir "):
         handle_mkdir(user_input[9:].strip()); return None
     if lower.startswith("ai-tree"):
@@ -3144,8 +3168,8 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
     # File actions menu
     if lower.startswith("ai-file ") or lower == "ai-file":
         farg = user_input[8:].strip()
-        if not farg:
-            farg = input("  File path: ").strip()
+        if not farg or farg in ["!find", "/", "\\/"]:
+            farg = get_path_interactively() or ""
         if farg:
             file_actions_menu(farg, prov, mod, key, hist)
         return None
@@ -3163,8 +3187,8 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
     # 'ai-edit' below since "ai-editor" would otherwise match that prefix first ──
     if lower.startswith("ai-editor"):
         farg = user_input[9:].strip()
-        if not farg:
-            farg = input("  File path: ").strip()
+        if not farg or farg in ["!find", "/", "\\/"]:
+            farg = get_path_interactively() or ""
         if farg:
             handle_view_editor(farg, prov, mod, key, hist)
         return None
@@ -3338,7 +3362,22 @@ def main():
             f"{c(BBLUE+BOLD,'❯')} "
         )
         try:
-            user_input = input(prompt_line).strip()
+            # Initialize session if not exists
+            if 'pt_session' not in session:
+                try:
+                    cmd_dict = _init_commands()
+                except:
+                    cmd_dict = {}
+                completer = CommandPaletteCompleter(cmd_dict)
+                session['pt_session'] = PromptSession(completer=completer, complete_while_typing=True)
+                
+            try:
+                user_input = session['pt_session'].prompt(ANSI(prompt_line)).strip()
+            except TypeError:
+                user_input = input(prompt_line).strip()
+                
+            if user_input in ["/", "/ ", "!find"]:
+                user_input = get_path_interactively() or ""
         except (EOFError, KeyboardInterrupt):
             print(c(BBLACK,"\n  Goodbye!\n"))
             break
@@ -3352,3 +3391,25 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+# Build COMMANDS for completion
+import re
+_commands_dict = {}
+try:
+    _m = re.search(r"HELP_TEXT\s*=\s*(?:f?\"\"\")[\s\S]*?(?:\"\"\")", globals().get('HELP_TEXT', '') or "")
+    # Actually wait, we can just parse the module's HELP_TEXT at module level...
+except: pass
+
+def _init_commands():
+    cmds = {}
+    for line in HELP_TEXT.splitlines():
+        if "{C}" in line and "{R}" in line:
+            m = re.search(r"\{C\}(.*?)\{R\}\s*(.*)", line)
+            if m:
+                cmd = m.group(1).strip().split(" ")[0]
+                desc = m.group(2).strip()
+                if cmd != "(just type)":
+                    cmds[cmd] = desc
+    return cmds

@@ -3430,28 +3430,47 @@ class CommandPaletteCompleter(Completer):
 # INTERACTIVE FILE MANAGER (prompt_toolkit full-screen TUI)
 # ═══════════════════════════════════════════════════════════════════════════════
 def get_path_interactively(start_path="."):
-    """Full-screen file/folder picker. Arrow Up/Down with wraparound,
-    Enter to open folder or select file, Esc/q/Ctrl-C to cancel."""
+    import shutil
     current_dir = os.path.abspath(start_path)
     selected_idx = [0]
     entries = [[]]
+    error_msg = [""]
 
     def refresh_entries():
         try:
             items = sorted(os.listdir(current_dir))
+            error_msg[0] = ""
         except PermissionError:
             items = []
+            error_msg[0] = " (Permission Denied)"
+        except OSError as e:
+            items = []
+            error_msg[0] = f" (Error: {e})"
+        
         entries[0] = [".."] + items
         selected_idx[0] = 0
 
     refresh_entries()
 
     def get_formatted_text():
-        lines = [("class:title", f" 📂 {current_dir} \n")]
-        lines.append(("class:hint", " ↑↓ move  Enter select  q cancel\n\n"))
-        for i, e in enumerate(entries[0]):
+        term_h = shutil.get_terminal_size().lines
+        max_items = max(5, term_h - 7)
+        
+        start_idx = max(0, selected_idx[0] - max_items // 2)
+        end_idx = start_idx + max_items
+        if end_idx > len(entries[0]):
+            end_idx = len(entries[0])
+            start_idx = max(0, end_idx - max_items)
+            
+        lines = [("class:title", f" 📂 {current_dir}{error_msg[0]} \n")]
+        
+        hint = " ↑↓: Move | Enter/→: Select | ←: Back | h: Home | s: Storage | q: Quit"
+        lines.append(("class:hint", f" {hint}  [{selected_idx[0]+1}/{len(entries[0])}]\n\n"))
+        
+        for i in range(start_idx, end_idx):
+            e = entries[0][i]
             full = os.path.join(current_dir, e)
-            is_dir = os.path.isdir(full)
+            is_dir = os.path.isdir(full) or e == ".."
             icon = "📁 " if is_dir else "📄 "
             if i == selected_idx[0]:
                 lines.append(("class:selected", f"  ❯ {icon}{e}\n"))
@@ -3491,6 +3510,22 @@ def get_path_interactively(start_path="."):
         nonlocal current_dir
         current_dir = os.path.dirname(current_dir)
         refresh_entries()
+        
+    @kb.add("h")
+    def _home(event):
+        nonlocal current_dir
+        current_dir = os.path.expanduser("~")
+        refresh_entries()
+        
+    @kb.add("s")
+    def _storage(event):
+        nonlocal current_dir
+        storage_path = "/storage/emulated/0"
+        if os.path.exists(storage_path):
+            current_dir = storage_path
+        elif os.path.exists(os.path.expanduser("~/storage")):
+            current_dir = os.path.expanduser("~/storage")
+        refresh_entries()
 
     @kb.add("c-c")
     @kb.add("escape")
@@ -3505,8 +3540,9 @@ def get_path_interactively(start_path="."):
         "entry":    "fg:white",
     })
 
-    app = Application(layout=layout, key_bindings=kb, style=_style, full_screen=True, refresh_interval=0.1)
+    app = Application(layout=layout, key_bindings=kb, style=_style, full_screen=True, refresh_interval=0.05)
     return app.run()
+
 
 
 def _init_commands():

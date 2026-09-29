@@ -715,49 +715,52 @@ def test_provider_models(provider_key: str, provider: dict, api_key: str, models
     return working
 
 
-def choose_model_interactive(provider_key: str, provider: dict, api_key: str) -> str:
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+def choose_model_interactive(provider_key_or_dict, provider: dict = None, api_key: str = None) -> str:
+    """Fetch real model list from endpoint, merge with known list, show all, let user pick."""
+    # Support both old call style (just provider dict) and new (provider_key, provider, api_key)
+    if provider is None:
+        # Old style: choose_model_interactive(provider_dict)
+        provider = provider_key_or_dict
+        provider_key = ""
+        api_key = ""
+    else:
+        provider_key = provider_key_or_dict
 
     known = list(provider.get("models", []))
     default = provider["default_model"]
 
-    print(f"\n{c(BBLUE,'  Testing models...')}", flush=True)
+    # Fetch live model list from endpoint (fast, no ping test)
+    sys.stdout.write(c(BBLUE, "  Fetching model list... "))
+    sys.stdout.flush()
+    discovered = discover_new_models(provider_key, provider, api_key or "")
+    sys.stdout.write(c(BBLACK, f"({len(discovered)} from endpoint)\n") if discovered else "\n")
 
-    # Discover new models for openai-type providers
-    new_models = discover_new_models(provider_key, provider, api_key)
-    all_models = list(dict.fromkeys(known + [m for m in new_models if m not in known]))
+    # Merge discovered with known, preserving order, known first
+    all_models = list(dict.fromkeys(known + [m for m in discovered if m not in known]))
 
-    working = test_provider_models(provider_key, provider, api_key, all_models)
-
-    if not working:
-        # Fallback: show all known if testing failed entirely
-        working = all_models if all_models else [default]
-
-    # Persist newly discovered working models back into provider
-    if new_models:
-        for m in new_models:
-            if m in working and m not in provider["models"]:
+    # Persist any newly found models
+    if discovered:
+        for m in discovered:
+            if m not in provider["models"]:
                 provider["models"].append(m)
         cfg = load_config()
         cfg.setdefault("provider_models", {})[provider_key] = provider["models"]
         save_config(cfg)
 
-    # Save the working list
-    cfg = load_config()
-    cfg.setdefault("working_models", {})[provider_key] = working
-    save_config(cfg)
+    display_models = all_models if all_models else [default]
 
-    print(f"\n{c(BBLUE,'Working models for')} {provider['name']}:")
-    for i, m in enumerate(working, 1):
+    print(f"\n{c(BBLUE,'Models for')} {provider['name']}:")
+    for i, m in enumerate(display_models, 1):
         star = c(BGREEN, " ★") if m == default else ""
-        print(f"  {c(BBLACK, str(i)+'.')} {m}{star}")
+        tag = c(BCYAN, " (new)") if m in discovered and m not in known else ""
+        print(f"  {c(BBLACK, str(i)+'.')} {m}{star}{tag}")
 
-    choice = input(f"  Model (Enter for {c(BGREEN, default if default in working else working[0])}): ").strip()
-    effective_default = default if default in working else working[0]
+    effective_default = default if default in display_models else display_models[0]
+    choice = input(f"  Model (Enter for {c(BGREEN, effective_default)}): ").strip()
     if not choice:
         return effective_default
-    if choice.isdigit() and 1 <= int(choice) <= len(working):
-        return working[int(choice)-1]
+    if choice.isdigit() and 1 <= int(choice) <= len(display_models):
+        return display_models[int(choice)-1]
     return choice
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2497,7 +2500,7 @@ def handle_ai_provider(session: dict):
     pk = choose_provider_interactive()
     prov = PROVIDERS[pk]
     key = get_api_key_for(prov, force_prompt=False)
-    mdl = choose_model_interactive(prov)
+    mdl = choose_model_interactive(pk, prov, key)
     session["provider_key"] = pk
     session["provider"] = prov
     session["api_key"] = key
@@ -2507,7 +2510,9 @@ def handle_ai_provider(session: dict):
 def handle_ai_model(session: dict):
     """Switch model only (same provider + key)."""
     prov = session["provider"]
-    mdl = choose_model_interactive(prov)
+    pk = session.get("provider_key", "")
+    key = session.get("api_key", "")
+    mdl = choose_model_interactive(pk, prov, key)
     session["model"] = mdl
     print(ok(f"\n  Model set to {mdl}\n"))
 

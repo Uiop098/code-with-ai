@@ -38,6 +38,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.shortcuts import PromptSession
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.formatted_text import ANSI
 
 
@@ -1172,11 +1173,19 @@ def handle_view_editor(farg: str, provider: dict, model: str, api_key: str, hist
                 os.makedirs(os.path.dirname(path), exist_ok=True)
             content = ""
 
+        from prompt_toolkit.lexers import PygmentsLexer
+        from pygments.lexers import get_lexer_for_filename
+        from pygments.util import ClassNotFound
+        try:
+            pt_lexer = PygmentsLexer(get_lexer_for_filename(path))
+        except ClassNotFound:
+            pt_lexer = None
+            
         text_area = TextArea(
             text=content,
             scrollbar=True,
             line_numbers=True,
-            lexer=None
+            lexer=pt_lexer
         )
 
         kb = KeyBindings()
@@ -1260,19 +1269,31 @@ def handle_view_editor(farg: str, provider: dict, model: str, api_key: str, hist
             os.system(f"nano '{path}'")
             
         elif res == "run":
-            # global
             print(f"\n> Running {path}...\n")
             ext = os.path.splitext(path)[1].lower()
             cmd = None
+            err_text = ""
+            
             if ext == ".py": cmd = ["python3", path]
             elif ext == ".js": cmd = ["node", path]
             elif ext == ".sh": cmd = ["bash", path]
             elif ext == ".rb": cmd = ["ruby", path]
             elif ext in (".c", ".cpp"):
                 cc = "gcc" if ext == ".c" else "g++"
-                tmp = "/tmp/a.out"
-                if subprocess.call([cc, path, "-o", tmp]) == 0:
-                    cmd = [tmp]
+                tmp = os.path.splitext(path)[0] + ".out"
+                cp = subprocess.run([cc, path, "-o", tmp, "-lm"], capture_output=True, text=True)
+                if cp.returncode == 0:
+                    cmd = [os.path.abspath(tmp)]
+                else:
+                    print(cp.stderr)
+                    err_text = cp.stderr
+            elif ext == ".java": cmd = ["java", path]
+            elif ext == ".go": cmd = ["go", "run", path]
+            elif ext == ".rs":
+                tmp = os.path.splitext(path)[0] + ".out"
+                cp = subprocess.run(["rustc", path, "-o", tmp], capture_output=True, text=True)
+                if cp.returncode == 0: cmd = [os.path.abspath(tmp)]
+                else: print(cp.stderr); err_text = cp.stderr
                 
             if cmd:
                 print(f"Executing: {' '.join(cmd)}\n")
@@ -1281,28 +1302,31 @@ def handle_view_editor(farg: str, provider: dict, model: str, api_key: str, hist
                     if p.stderr:
                         sys.stdout.write(p.stderr)
                         sys.stdout.flush()
-                        
-                    if p.returncode != 0:
-                        ans = input(f"\n[Command failed] Ask AI to analyze and fix the syntax error? [Y/n]: ")
-                        if ans.lower() in ('', 'y', 'yes'):
-                            _prov = session.get("provider") if session else provider
-                            _mod = session.get("model") if session else model
-                            _key = session.get("api_key") if session else api_key
-                            if session: ensure_ai_ready(session)
-                            prompt = f"Executing {os.path.basename(path)} failed:\n\n{p.stderr}\n\nFix the error in this file.\nReturn ONLY the replacement script inside a markdown code block. Do not add outside chatter."
-                            print("\nAsking AI for fix...")
-                            reply = send_message(_prov, _mod, _key, [], prompt, silent=True, include_context=True)
-                            
-                            if reply:
-                                extracted = extract_code_from_reply(reply)
-                                if extracted:
-                                    with open(path, "w", encoding="utf-8") as f:
-                                        f.write(extracted)
-                                    print("\nAI applied fix! Reloading in editor...")
+                        err_text = p.stderr
+                    if p.returncode == 0:
+                        err_text = ""
                 except KeyboardInterrupt:
                     pass
-            else:
+            elif not err_text:
                 print("No quick-runner defined for this extension.")
+                
+            if err_text:
+                ans = input(f"\n[Command failed] Ask AI to analyze and fix the syntax error? [Y/n]: ")
+                if ans.lower() in ('', 'y', 'yes'):
+                    _prov = session.get("provider") if session else provider
+                    _mod = session.get("model") if session else model
+                    _key = session.get("api_key") if session else api_key
+                    if session: ensure_ai_ready(session)
+                    prompt = f"Executing {os.path.basename(path)} failed:\n\n{err_text}\n\nFix the error in this file.\nReturn ONLY the replacement script inside a markdown code block. Do not add outside chatter."
+                    print("\nAsking AI for fix...")
+                    reply = send_message(_prov, _mod, _key, [], prompt, silent=True, include_context=False)
+                    
+                    if reply:
+                        extracted = extract_code_from_reply(reply)
+                        if extracted:
+                            with open(path, "w", encoding="utf-8") as f:
+                                f.write(extracted)
+                            print("\nAI applied fix! Reloading in editor...")
             
             input("\nPress Enter to return to editor...")
             
@@ -2641,10 +2665,10 @@ HELP_TEXT = """
   {C}/key{R}               Update API key (same provider)
 
 {B}MODE SWITCHES{R}
-  {C}!!ai{R}                  Drop into a bare AI-only chat (no commands);
+  {C}/ai_only{R}                  Drop into a bare AI-only chat (no commands);
                      type '/full' inside it to come back
-  {C}!!editor <file>{R}       Open the manual in-Termux editor directly
-  {C}!!aieditor <file>{R}     Same, but jumps straight to the editor's
+  {C}/editor <file>{R}       Open the manual in-Termux editor directly
+  {C}/aieditor <file>{R}     Same, but jumps straight to the editor's
                      'ai' prompt — same as 'e/ai <file>'
   {C}e/ai <file>{R}           Alias for !!aieditor
 
@@ -2657,7 +2681,7 @@ HELP_TEXT = """
   {C}/file <file>{R}       Open file actions menu (view/AI/run/delete/…)
   {C}/editor <file>{R}     Manual line editor, directly in Termux — has
                      its own 'ai' command to ask/rewrite mid-edit
-  {C}e-open <file|dir>{R}    Open a file in the editor; if given a folder,
+  {C}/open <file|dir>{R}    Open a file in the editor; if given a folder,
                      lists it and asks which file to open
   {C}/open <file>{R}       Attach file to AI context
   {C}/close <file|all>{R}  Detach file(s) from context
@@ -2667,13 +2691,13 @@ HELP_TEXT = """
 {B}AI EXPLAIN / DEBUG / CHECK{R}
   {C}/explain <f|dir> [-s|-l]{R}   AI explains a file or whole folder
                      -s short (default), -l long/detailed
-  {C}eai-explain{R}          Same as /explain — for use inside editor flows
+  {C}/explain{R}          Same as /explain — for use inside editor flows
   {C}/debug <file>{R}      AI finds bugs with line numbers + reasons,
                      then offers to hand off to /edit to fix them
-  {C}eai-debug{R}            Same as /debug
+  {C}/debug{R}            Same as /debug
   {C}/check <f|dir>{R}     Direct syntax/compile check, no editor, no run —
                      exact file/line/column + reason per issue
-  {C}eai-check{R}            Same as /check
+  {C}/check{R}            Same as /check
 
 {B}HISTORY & SESSION{R}
   {C}/history [N]{R}      Show last N chat messages (default 10)
@@ -2730,11 +2754,11 @@ HELP_TEXT = """
   {C}/servelog{R}          List every server currently running
 
 {B}TELEGRAM BOT BRIDGE{R}
-  {C}tbot-token{R}            Set/change the bot token — asked right here in
+  {C}/tbot-token{R}            Set/change the bot token — asked right here in
                      the terminal, never stored in this file. No argument
                      prompts (hidden input); with a token typed inline it's
-                     set instantly: {C}tbot-token 123456:ABC...{R}
-                     {C}tbot-token clear{R} removes it for this session.
+                     set instantly: {C}/tbot-token 123456:ABC...{R}
+                     {C}/tbot-token clear{R} removes it for this session.
                      Launch flag for a fast start: {C}--tbot-token YOUR_TOKEN{R}
                      (or set TELEGRAM_BOT_TOKEN in the environment).
   {C}/telegram{R}          Connect this AI session to a Telegram bot
@@ -2783,8 +2807,8 @@ def print_banner(provider_name: str, model: str):
         c(BBLACK,"Type to chat  "),
         c(BCYAN,"!cmd")+c(BBLACK," for terminal  "),
         c(BCYAN,"ai-file <f>")+c(BBLACK," for file actions  "),
-        c(BCYAN,"ai-serve")+c(BBLACK," to run on localhost  "),
-        c(BCYAN,"ai-help")+c(BBLACK," for all commands"),
+        c(BCYAN,"/serve")+c(BBLACK," to run on localhost  "),
+        c(BCYAN,"/help")+c(BBLACK," for all commands"),
     ]
     print("  " + "".join(hints))
     if not HAS_PYGMENTS:
@@ -2933,7 +2957,7 @@ def handle_ai_copy():
     print(text + "\n")
 
 def handle_ai_search(session, user_input):
-    query = user_input[len("ai-search"):].strip()
+    query = user_input[len("/search"):].strip()
     if not query:
         print(warn("  Usage: ai-search <query>\n"))
         return
@@ -2998,7 +3022,7 @@ def handle_ai_template(user_input):
     print(ok(f"  Created {filename} from template '{name}'.\n"))
 
 def handle_ai_git(user_input):
-    cmd = user_input[len("ai-git"):].strip()
+    cmd = user_input[len("/git"):].strip()
     if not cmd:
         print(warn("  Usage: ai-git status/add/commit/push/log/diff/init/clone\n"))
         return
@@ -3051,7 +3075,7 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
             return None
         print(c(BBLACK, "\n  Goodbye!\n"))
         return "exit"
-    if lower == "ai-telegram":
+    if lower == "/telegram":
         if via_telegram:
             print(warn("  Already bridged to Telegram — can't start another bridge from inside it.\n"))
             return None
@@ -3064,22 +3088,22 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
         session["ai_enabled"] = False; print(warn("  AI responses disabled.\n")); return None
 
     # ── Mode switches: !!ai / !!editor / !!aieditor ─────────────────────────
-    if lower in ("!!ai",):
+    if lower in ("/ai_only",):
         if via_telegram:
             print(warn("  '!!ai' mode is terminal-only — just chat normally here.\n")); return None
         result = run_ai_only_chat(session)
         if result == "full":
             print(ok("  Back to the full command set.\n"))
         return None
-    if lower == "!!editor" or lower.startswith("!!editor "):
-        farg = user_input[len("!!editor"):].strip()
+    if lower == "/editor" or lower.startswith("!!editor "):
+        farg = user_input[len("/editor"):].strip()
         if not farg or farg in ["!find", "/", "\\/"]:
             farg = get_path_interactively() or ""
         if farg:
             handle_view_editor(farg, prov, mod, key, hist, session=session)
         return None
-    if lower == "!!aieditor" or lower.startswith("!!aieditor ") or lower == "e/ai" or lower.startswith("e/ai "):
-        prefix = "!!aieditor" if lower.startswith("!!aieditor") else "e/ai"
+    if lower == "/aieditor" or lower.startswith("!!aieditor ") or lower == "/aieditor" or lower.startswith("e/ai "):
+        prefix = "/aieditor" if lower.startswith("/aieditor") else "/aieditor"
         farg = user_input[len(prefix):].strip()
         if not farg or farg in ["!find", "/", "\\/"]:
             farg = get_path_interactively() or ""
@@ -3088,8 +3112,8 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
         return None
 
     # ── e-open: open a file (or pick one from a folder) directly in the editor ──
-    if lower.startswith("e-open") :
-        farg = user_input[len("e-open"):].strip()
+    if lower.startswith("/open") :
+        farg = user_input[len("/open"):].strip()
         if not farg or farg in ["!find", "/", "\\/"]:
             farg = get_path_interactively() or ""
         if not farg:
@@ -3104,77 +3128,77 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
         return None
 
     # ── AI explain / debug / check (eai-* inside the editor context, ai-* generally) ──
-    if lower.startswith("eai-explain") or lower.startswith("ai-explain"):
-        prefix_len = len("eai-explain") if lower.startswith("eai-explain") else len("ai-explain")
+    if lower.startswith("/explain") or lower.startswith("/explain"):
+        prefix_len = len("/explain") if lower.startswith("/explain") else len("/explain")
         handle_explain(prov, mod, key, hist, user_input[prefix_len:].strip()); return None
-    if lower.startswith("eai-debug") or lower.startswith("ai-debug"):
-        prefix_len = len("eai-debug") if lower.startswith("eai-debug") else len("ai-debug")
+    if lower.startswith("/debug") or lower.startswith("/debug"):
+        prefix_len = len("/debug") if lower.startswith("/debug") else len("/debug")
         handle_debug(prov, mod, key, hist, user_input[prefix_len:].strip()); return None
-    if lower.startswith("eai-check") or lower.startswith("ai-check"):
-        prefix_len = len("eai-check") if lower.startswith("eai-check") else len("ai-check")
+    if lower.startswith("/check") or lower.startswith("/check"):
+        prefix_len = len("/check") if lower.startswith("/check") else len("/check")
         handle_check(user_input[prefix_len:].strip()); return None
 
     # ── File operations: rename / reformat / zip / unzip / move / copy ─────────
-    if lower.startswith("d-rename"):
-        handle_rename(user_input[len("d-rename"):].strip()); return None
-    if lower.startswith("d-reformat"):
-        handle_reformat(prov, mod, key, hist, user_input[len("d-reformat"):].strip()); return None
-    if lower.startswith("d-zip"):
-        handle_zip(user_input[len("d-zip"):].strip()); return None
-    if lower.startswith("d-unzip"):
-        handle_unzip(user_input[len("d-unzip"):].strip()); return None
-    if lower.startswith("d-move"):
-        handle_move(user_input[len("d-move"):].strip()); return None
-    if lower.startswith("d-copy"):
-        handle_copy(user_input[len("d-copy"):].strip()); return None
+    if lower.startswith("/rename"):
+        handle_rename(user_input[len("/rename"):].strip()); return None
+    if lower.startswith("/reformat"):
+        handle_reformat(prov, mod, key, hist, user_input[len("/reformat"):].strip()); return None
+    if lower.startswith("/zip"):
+        handle_zip(user_input[len("/zip"):].strip()); return None
+    if lower.startswith("/unzip"):
+        handle_unzip(user_input[len("/unzip"):].strip()); return None
+    if lower.startswith("/move"):
+        handle_move(user_input[len("/move"):].strip()); return None
+    if lower.startswith("/copy"):
+        handle_copy(user_input[len("/copy"):].strip()); return None
 
     # ── Help ──────────────────────────────────────────────────────────────
     # ── New commands ──────────────────────────────────────────────────────────
-    if lower == "ai-replit-bot":
+    if lower == "/replit-bot":
         handle_ai_replit_bot(session)
         return None
-    if lower.startswith("ai-history"):
+    if lower.startswith("/history"):
         handle_ai_history(session, user_input)
         return None
-    if lower == "ai-clear":
+    if lower == "/clear":
         handle_ai_clear(session)
         return None
-    if lower == "ai-retry":
+    if lower == "/retry":
         if not session.get("last_user_message"):
             print(warn("  No previous user message to retry.\n"))
             return None
         print(c(BBLACK, "  Retrying..."))
         send_message(prov, mod, key, hist, session["last_user_message"])
         return None
-    if lower == "ai-copy":
+    if lower == "/copy":
         handle_ai_copy()
         return None
-    if lower.startswith("ai-search"):
+    if lower.startswith("/search"):
         handle_ai_search(session, user_input)
         return None
-    if lower == "ai-cost":
+    if lower == "/cost":
         handle_ai_cost(session)
         return None
-    if lower.startswith("ai-template"):
+    if lower.startswith("/template"):
         handle_ai_template(user_input)
         return None
-    if lower.startswith("ai-git"):
+    if lower.startswith("/git"):
         handle_ai_git(user_input)
         return None
 
-    if lower == "ai-help":
+    if lower == "/help":
         print_help(prompts); return None
 
     # ── Status ────────────────────────────────────────────────────────────
-    if lower == "ai-status":
+    if lower == "/status":
         handle_ai_status(session); return None
 
     # ── Provider / model / key switching ────────────────────────────────────
-    if lower == "ai-provider":
+    if lower == "/provider":
         handle_ai_provider(session); return None
-    if lower == "ai-model":
+    if lower == "/model":
         handle_ai_model(session); return None
-    if lower == "ai-key":
+    if lower == "/key":
         handle_ai_key(session); return None
 
     # ── Terminal passthrough: ! prefix ───────────────────────────────────────
@@ -3191,24 +3215,24 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
         print(f"  Terminal AI analysis: {state}\n"); return None
 
     # ── File & folder commands ───────────────────────────────────────────────
-    if lower == "ai-pwd":
+    if lower == "/pwd":
         print(f"  {c(BBLUE, os.getcwd())}\n"); return None
     arg = user_input[5:].strip()
-    if lower == "ai-cd" or arg in ["!find", "/", "\\/"]: # catch / and !find
+    if lower == "/cd" or arg in ["!find", "/", "\\/"]: # catch / and !find
         p = get_path_interactively()
         if p: handle_cd(p)
         return None
-    if lower.startswith("ai-cd "):
+    if lower.startswith("/cd "):
         handle_cd(arg); return None
-    if lower.startswith("ai-mkdir "):
+    if lower.startswith("/mkdir "):
         handle_mkdir(user_input[9:].strip()); return None
-    if lower.startswith("ai-tree"):
+    if lower.startswith("/tree"):
         handle_tree(user_input[7:].strip()); return None
-    if lower.startswith("ai-ls"):
+    if lower.startswith("/ls"):
         handle_ls(user_input[5:].strip()); return None
 
     # File actions menu
-    if lower.startswith("ai-file ") or lower == "ai-file":
+    if lower.startswith("/file ") or lower == "/file":
         farg = user_input[8:].strip()
         if not farg or farg in ["!find", "/", "\\/"]:
             farg = get_path_interactively() or ""
@@ -3216,18 +3240,18 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
             file_actions_menu(farg, prov, mod, key, hist)
         return None
 
-    if lower.startswith("ai-open "):
+    if lower.startswith("/open "):
         handle_open(user_input[8:].strip()); return None
-    if lower.startswith("ai-close ") or lower == "ai-close":
-        handle_close(user_input[9:].strip() if lower.startswith("ai-close ") else ""); return None
-    if lower == "ai-files":
+    if lower.startswith("/close ") or lower == "/close":
+        handle_close(user_input[9:].strip() if lower.startswith("/close ") else ""); return None
+    if lower == "/files":
         handle_files_list(); return None
-    if lower.startswith("ai-lang "):
+    if lower.startswith("/lang "):
         handle_lang(user_input[8:].strip()); return None
 
     # ── Manual in-Termux editor (with AI available inside it) — checked before
-    # 'ai-edit' below since "ai-editor" would otherwise match that prefix first ──
-    if lower.startswith("ai-editor"):
+    # 'ai-edit' below since "/editor" would otherwise match that prefix first ──
+    if lower.startswith("/editor"):
         farg = user_input[9:].strip()
         if not farg or farg in ["!find", "/", "\\/"]:
             farg = get_path_interactively() or ""
@@ -3236,16 +3260,16 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
         return None
 
     # ── AI editing ────────────────────────────────────────────────────────────
-    if lower.startswith("ai-edit"):
+    if lower.startswith("/edit"):
         handle_edit(prov, mod, key, hist, user_input[7:].strip()); return None
-    if lower.startswith("ai-new"):
+    if lower.startswith("/new"):
         handle_new(prov, mod, key, hist, user_input[6:].strip()); return None
-    if lower.startswith("ai-save-as "):
+    if lower.startswith("/save-as "):
         handle_save_as(user_input[11:].strip()); return None
 
     # ── Run file ──────────────────────────────────────────────────────────────
-    if lower.startswith("ai-run") or lower.startswith("d-run"):
-        prefix_len = 6 if lower.startswith("ai-run") else 5
+    if lower.startswith("/run") or lower.startswith("/run"):
+        prefix_len = 6 if lower.startswith("/run") else 5
         parts = user_input[prefix_len:].strip().split()
         file_arg = parts[0] if parts else ""
         extra = parts[1:] if len(parts)>1 else []
@@ -3254,27 +3278,27 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
         handle_run(file_arg, extra); return None
 
     # ── Run on localhost (html/php/css/js/static + PHP execution) ─────────────
-    if lower.startswith("ai-serve") or lower.startswith("d-serve"):
-        prefix_len = 8 if lower.startswith("ai-serve") else 7
+    if lower.startswith("/serve") or lower.startswith("/serve"):
+        prefix_len = 8 if lower.startswith("/serve") else 7
         handle_serve(user_input[prefix_len:].strip()); return None
-    if lower.startswith("ai-stopserve") or lower.startswith("d-stopserve"):
-        sarg = user_input[len("ai-stopserve"):].strip() if lower.startswith("ai-stopserve") else user_input[len("d-stopserve"):].strip()
+    if lower.startswith("/stopserve") or lower.startswith("/stopserve"):
+        sarg = user_input[len("/stopserve"):].strip() if lower.startswith("/stopserve") else user_input[len("/stopserve"):].strip()
         handle_stop_serve(sarg); return None
-    if lower.startswith("ai-servelog") or lower.startswith("d-servelog"):
+    if lower.startswith("/servelog") or lower.startswith("/servelog"):
         handle_serve_log(); return None
 
     # ── Telegram token ────────────────────────────────────────────────────────
-    if lower == "tbot-token" or lower.startswith("tbot-token "):
+    if lower == "/tbot-token" or lower.startswith("/tbot-token "):
         if via_telegram:
             print(warn("  Changing the bot token from inside Telegram isn't supported for safety — "
                         "use the terminal.\n"))
             return None
-        handle_tbot_token(session, user_input[len("tbot-token"):].strip()); return None
+        handle_tbot_token(session, user_input[len("/tbot-token"):].strip()); return None
 
     # ── Saved prompts ─────────────────────────────────────────────────────────
-    if lower == "ai-save":
+    if lower == "/save":
         handle_save_prompt(prompts); return None
-    if lower == "ai-list":
+    if lower == "/list":
         if prompts:
             print(c(BYELLOW+BOLD,"\n  Saved prompts:"))
             for name, text in prompts.items():
@@ -3284,7 +3308,7 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
         else:
             print(warn("  No saved prompts. Use 'ai-save'.\n"))
         return None
-    if lower.startswith("ai-del "):
+    if lower.startswith("/del "):
         handle_delete_prompt(prompts, user_input[7:].strip()); return None
 
     # Run saved prompt
@@ -3422,7 +3446,7 @@ def main():
                 except:
                     cmd_dict = {}
                 completer = CommandPaletteCompleter(cmd_dict)
-                session['pt_session'] = PromptSession(completer=completer, complete_while_typing=True)
+                session['pt_session'] = PromptSession(completer=completer, complete_while_typing=True, auto_suggest=AutoSuggestFromHistory())
                 
             try:
                 user_input = session['pt_session'].prompt(ANSI(prompt_line)).strip()

@@ -19,7 +19,12 @@ Setup:
 Dependencies used if installed: requests (required), pygments (syntax colors)
 """
 
-import os, sys, re, json, shutil, socket, signal, difflib, getpass, subprocess, textwrap, shlex, time, io, contextlib, zipfile, threading
+import os, sys, re, json, shutil, socket, signal, difflib, getpass, subprocess, textwrap, shlex, time, io, contextlib, zipfile, threading, base64
+try:
+    from flask import Flask
+    HAS_FLASK = True
+except ImportError:
+    HAS_FLASK = False
 from datetime import datetime
 
 # ─── Optional dependency: Pygments for syntax highlighting ───────────────────
@@ -410,8 +415,74 @@ PROVIDERS = {
         "key_url": "console.mistral.ai/api-keys",
         "models": ["mistral-small-latest", "mistral-large-latest", "codestral-latest"],
     },
-    "omniroute": {
-        "name": "OmniRoute", "type": "openai",
+    
+    "pollinations": {
+        "name": "Pollinations AI", "type": "pollinations",
+        "endpoint": "https://text.pollinations.ai/",
+        "default_model": "openai",
+        "env_var": "POLLINATIONS_API_KEY",
+        "key_url": "pollinations.ai",
+        "models": ["openai", "mistral", "claude", "gemini"],
+        "free": True,
+    },
+    "huggingface": {
+        "name": "HuggingFace", "type": "openai",
+        "endpoint": "https://api-inference.huggingface.co/v1/chat/completions",
+        "default_model": "meta-llama/Llama-3.2-11B-Vision-Instruct",
+        "env_var": "HF_TOKEN",
+        "key_url": "huggingface.co/settings/tokens",
+        "models": ["meta-llama/Llama-3.2-11B-Vision-Instruct", "Qwen/Qwen2.5-Coder-32B-Instruct", "mistralai/Mistral-7B-Instruct-v0.3"],
+    },
+    "githubmodels": {
+        "name": "GitHub Models", "type": "openai",
+        "endpoint": "https://models.inference.ai.azure.com/chat/completions",
+        "default_model": "gpt-4o-mini",
+        "env_var": "GITHUB_TOKEN",
+        "key_url": "github.com/settings/tokens",
+        "models": ["gpt-4o-mini", "gpt-4o", "Meta-Llama-3.1-70B-Instruct", "Mistral-small"],
+    },
+    "cerebras": {
+        "name": "Cerebras", "type": "openai",
+        "endpoint": "https://api.cerebras.ai/v1/chat/completions",
+        "default_model": "llama3.1-70b",
+        "env_var": "CEREBRAS_API_KEY",
+        "key_url": "cloud.cerebras.ai",
+        "models": ["llama3.1-70b", "llama3.1-8b"],
+    },
+    "sambanova": {
+        "name": "SambaNova", "type": "openai",
+        "endpoint": "https://fast-api.snova.ai/v1/chat/completions",
+        "default_model": "Meta-Llama-3.3-70B-Instruct",
+        "env_var": "SAMBANOVA_API_KEY",
+        "key_url": "cloud.sambanova.ai",
+        "models": ["Meta-Llama-3.3-70B-Instruct", "Qwen2.5-Coder-32B-Instruct"],
+    },
+    "hyperbolic": {
+        "name": "Hyperbolic", "type": "openai",
+        "endpoint": "https://api.hyperbolic.xyz/v1/chat/completions",
+        "default_model": "meta-llama/Llama-3.3-70B-Instruct",
+        "env_var": "HYPERBOLIC_API_KEY",
+        "key_url": "app.hyperbolic.xyz/settings",
+        "models": ["meta-llama/Llama-3.3-70B-Instruct", "Qwen/Qwen2.5-Coder-32B-Instruct"],
+    },
+    "novita": {
+        "name": "Novita AI", "type": "openai",
+        "endpoint": "https://api.novita.ai/v3/openai/chat/completions",
+        "default_model": "meta-llama/llama-3.1-8b-instruct",
+        "env_var": "NOVITA_API_KEY",
+        "key_url": "novita.ai/settings/key-management",
+        "models": ["meta-llama/llama-3.1-8b-instruct", "meta-llama/llama-3.3-70b-instruct"],
+    },
+    "chutes": {
+        "name": "Chutes AI", "type": "openai",
+        "endpoint": "https://llm.chutes.ai/v1/chat/completions",
+        "default_model": "deepseek-ai/DeepSeek-V3-0324",
+        "env_var": "CHUTES_API_KEY",
+        "key_url": "chutes.ai",
+        "models": ["deepseek-ai/DeepSeek-V3-0324", "deepseek-ai/DeepSeek-R1"],
+    },
+    "custom": {
+        "name": "Custom Provider", "type": "openai",
         "endpoint": "http://127.0.0.1:20128/v1/chat/completions",
         "default_model": "auto",
         "env_var": "OMNIROUTE_API_KEY",
@@ -427,7 +498,7 @@ PROVIDERS = {
         "models": ["command-r-08-2024", "command-r-plus-08-2024"],
     },
 }
-PROVIDER_ORDER = ["anthropic", "groq", "gemini", "openai", "openrouter", "together", "mistral", "cohere", "omniroute"]
+PROVIDER_ORDER = ["anthropic", "groq", "gemini", "openai", "openrouter", "together", "mistral", "cohere", "custom", "pollinations", "huggingface", "githubmodels", "cerebras", "sambanova", "hyperbolic", "novita", "chutes"]
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Saved prompts
@@ -494,6 +565,14 @@ def file_mtime_str(path: str) -> str:
 # Provider: setup / switch
 # ═══════════════════════════════════════════════════════════════════════════════
 def choose_provider_interactive() -> str:
+    import urllib.request
+    try:
+        urllib.request.urlopen("http://127.0.0.1:20128/v1/models", timeout=1.0)
+        PROVIDERS["custom"]["endpoint"] = "http://127.0.0.1:20128/v1/chat/completions"
+        PROVIDERS["custom"]["name"] = "Custom Provider"
+    except Exception:
+        PROVIDERS["custom"]["name"] = "Custom Provider (no local server detected)"
+
     print(f"\n{header_bar('Choose Provider', BBLUE)}")
     for i, key in enumerate(PROVIDER_ORDER, 1):
         p = PROVIDERS[key]
@@ -540,6 +619,18 @@ def choose_model_interactive(provider: dict) -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 def build_request(provider: dict, model: str, api_key: str, history: list):
     ptype = provider["type"]
+    if ptype == "pollinations":
+        url = provider["endpoint"]
+        headers = {"Content-Type": "application/json"}
+        body = {"messages": history, "jsonMode": False, "model": model}
+        return url, headers, body
+    if ptype == "pollinations":
+        if data.get("_pollinations_text"):
+            return data["_pollinations_text"]
+        try:
+            return data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError):
+            return ""
     if ptype == "anthropic":
         url = provider["endpoint"]
         headers = {
@@ -575,6 +666,18 @@ def build_request(provider: dict, model: str, api_key: str, history: list):
 
 def extract_reply(provider: dict, data: dict) -> str:
     ptype = provider["type"]
+    if ptype == "pollinations":
+        url = provider["endpoint"]
+        headers = {"Content-Type": "application/json"}
+        body = {"messages": history, "jsonMode": False, "model": model}
+        return url, headers, body
+    if ptype == "pollinations":
+        if data.get("_pollinations_text"):
+            return data["_pollinations_text"]
+        try:
+            return data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError):
+            return ""
     if ptype == "anthropic":
         return "".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
     if ptype == "gemini":
@@ -628,7 +731,13 @@ def send_message(provider, model, api_key, history, text,
             try:
                 resp = _requests.post(url, headers=headers, json=body, timeout=90)
                 resp.raise_for_status()
-                data = resp.json()
+                try:
+                    data = resp.json()
+                except ValueError:
+                    if provider.get("type") == "pollinations":
+                        data = {"_pollinations_text": resp.text}
+                    else:
+                        raise
                 break
             except _requests.exceptions.HTTPError:
                 try:
@@ -711,6 +820,12 @@ def _print_ai_reply(reply: str):
             for line in textwrap.wrap(part.strip(), width=min(term_width()-4, 76)):
                 print(f"  {c(WHITE, line)}")
     print(c(BMAGENTA+BOLD, "╰" + "─"*45) + "\n")
+    if os.environ.get("TERM") == "xterm" or "TTY_WRITE_BINARY" in os.environ:
+        try:
+            b64 = base64.b64encode(reply.encode('utf-8')).decode('utf-8')
+            print(f'\033]52;c;{b64}\007', end='', flush=True)
+        except Exception:
+            pass
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Context block builder
@@ -2366,6 +2481,22 @@ HELP_TEXT = """
                      exact file/line/column + reason per issue
   {C}eai-check{R}            Same as ai-check
 
+{B}HISTORY & SESSION{R}
+  {C}ai-history [N]{R}      Show last N chat messages (default 10)
+  {C}ai-clear{R}           Clear chat history
+  {C}ai-retry{R}           Resend last user message
+  {C}ai-copy{R}            Copy last AI reply to clipboard
+  {C}ai-cost{R}            Show estimated session token usage
+
+{B}SEARCH & WEB{R}
+  {C}ai-search <query>{R}  Search DuckDuckGo, show top results, optionally ask AI
+
+{B}CODE TEMPLATES{R}
+  {C}ai-template [name]{R} Generate boilerplate (flask-app, telegram-bot, cli-tool, react-app, fastapi)
+
+{B}GIT SHORTCUTS{R}
+  {C}ai-git <subcmd>{R}    Shortcuts: status/add/commit/push/log/diff/init/clone
+
 {B}FILE OPERATIONS{R}
   {C}d-rename <f|dir>{R}     Rename (asks for the new name)
   {C}d-reformat <file>{R}    Change format/extension; optionally has AI
@@ -2520,6 +2651,187 @@ class _Tee:
         self.real.flush()
 
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# New Feature Handlers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def handle_ai_replit_bot(session):
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if not bot_token:
+        bot_token = input(c(BBLUE, "  Enter Telegram Bot Token: ")).strip()
+        if not bot_token:
+            print(warn("  Bot token required.\n"))
+            return
+        os.environ["TELEGRAM_BOT_TOKEN"] = bot_token
+
+    print(ok("  Web server started on :8080 for Replit keep-alive. Connecting Telegram bot...\n"))
+    
+    if HAS_FLASK:
+        app = Flask(__name__)
+        @app.route('/')
+        def home():
+            return "Bot is running!"
+        def run_server():
+            import logging
+            log = logging.getLogger('werkzeug')
+            log.setLevel(logging.ERROR)
+            app.run(host='0.0.0.0', port=8080)
+        t = threading.Thread(target=run_server, daemon=True)
+        t.start()
+    else:
+        print(warn("  Flask not installed, skipping keep-alive server.\n"))
+
+    handle_telegram(session)
+
+
+def handle_ai_history(session, user_input):
+    parts = user_input.split()
+    n = 10
+    if len(parts) > 1 and parts[1].isdigit():
+        n = int(parts[1])
+    hist = session["history"]
+    if not hist:
+        print(dim("  History is empty.\n"))
+        return
+    print(c(BBLUE, f"  Last {n} Messages:\n"))
+    for msg in hist[-n:]:
+        role = msg['role'].capitalize()
+        content = textwrap.shorten(msg['content'], width=100, placeholder="...")
+        color = BGREEN if role == "User" else BMAGENTA
+        print(c(color, f"  [{role}]: ") + c(WHITE, content))
+    print()
+
+def handle_ai_clear(session):
+    conf = input(warn("  Clear chat history? (y/N): ")).strip().lower()
+    if conf == 'y':
+        session["history"].clear()
+        print(ok("  History cleared.\n"))
+    else:
+        print(dim("  Cancelled.\n"))
+
+def handle_ai_copy():
+    global last_reply
+    if not last_reply:
+        print(warn("  No recent AI reply to copy.\n"))
+        return
+    text = last_reply
+    try:
+        if shutil.which("termux-clipboard-set"):
+            subprocess.run(["termux-clipboard-set"], input=text.encode(), check=True)
+            print(ok("  Copied to Termux clipboard.\n"))
+            return
+        elif shutil.which("pbcopy"):
+            subprocess.run(["pbcopy"], input=text.encode(), check=True)
+            print(ok("  Copied to Mac clipboard.\n"))
+            return
+        elif shutil.which("xclip"):
+            subprocess.run(["xclip", "-selection", "clipboard"], input=text.encode(), check=True)
+            print(ok("  Copied via xclip.\n"))
+            return
+        elif shutil.which("xsel"):
+            subprocess.run(["xsel", "--clipboard", "--input"], input=text.encode(), check=True)
+            print(ok("  Copied via xsel.\n"))
+            return
+    except Exception as e:
+        pass
+    print(warn("  No clipboard tool found. Text:\n"))
+    print(text + "\n")
+
+def handle_ai_search(session, user_input):
+    query = user_input[len("ai-search"):].strip()
+    if not query:
+        print(warn("  Usage: ai-search <query>\n"))
+        return
+    print(dim(f"  Searching DuckDuckGo for: {query}..."))
+    try:
+        url = "https://lite.duckduckgo.com/lite/"
+        resp = _requests.post(url, data={"q": query}, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        html = resp.text
+        # Very rough regex for snippets
+        snippets = re.findall(r'<td class="result-snippet">(.+?)</td>', html, flags=re.IGNORECASE)
+        if not snippets:
+            print(warn("  No results found.\n"))
+            return
+        results_text = "Search results for {}:\n".format(query)
+        for i, snip in enumerate(snippets[:5], 1):
+            cln = re.sub(r'<[^>]+>', '', snip).strip()
+            print(c(BWHITE, f"  {i}.") + f" {cln}")
+            results_text += f"{i}. {cln}\n"
+        print()
+        ask = input(c(BBLUE, "  Send results to AI? (y/N): ")).strip().lower()
+        if ask == 'y':
+            session["last_user_message"] = results_text
+            send_message(session["provider"], session["model"], session["api_key"], session["history"], "I searched for " + query + " and found:\n" + results_text)
+    except Exception as e:
+        print(err(f"  Search failed: {e}\n"))
+
+def handle_ai_cost(session):
+    hist = session["history"]
+    total_chars = sum(len(m["content"]) for m in hist)
+    approx_tokens = total_chars // 4
+    cost_notes = "(approximate estimate only)"
+    print(c(BWHITE, "  Session Usage Estimate:"))
+    print(f"    Total Characters: {total_chars}")
+    print(f"    Approx. Tokens:   {approx_tokens} {dim(cost_notes)}\n")
+
+def handle_ai_template(user_input):
+    parts = user_input.split()
+    name = parts[1] if len(parts) > 1 else ""
+    templates = {
+        "flask-app": "from flask import Flask\napp = Flask(__name__)\n\n@app.route('/')\ndef index():\n    return 'Hello World'\n\nif __name__ == '__main__':\n    app.run(debug=True)\n",
+        "telegram-bot": "import os\nimport telebot\n\nbot = telebot.TeleBot(os.environ.get('BOT_TOKEN'))\n\n@bot.message_handler(commands=['start'])\ndef start(m):\n    bot.reply_to(m, 'Hello')\n\nbot.polling()\n",
+        "cli-tool": "import sys\nimport argparse\n\ndef main():\n    parser = argparse.ArgumentParser()\n    args = parser.parse_args()\n    print('Running')\n\nif __name__ == '__main__':\n    main()\n",
+        "react-app": "import React from 'react';\n\nexport default function App() {\n  return <div>Hello World</div>;\n}\n",
+        "fastapi": "from fastapi import FastAPI\n\napp = FastAPI()\n\n@app.get('/')\ndef read_root():\n    return {'Hello': 'World'}\n"
+    }
+    if not name or name not in templates:
+        print(c(BWHITE, "  Available templates:"))
+        for t in templates:
+            print("    " + t)
+        print()
+        return
+    
+    ext_map = {"react-app": "jsx"}
+    ext = ext_map.get(name, "py")
+    filename = f"{name}.{ext}"
+    if os.path.exists(filename):
+        print(warn(f"  {filename} already exists.\n"))
+        return
+    with open(filename, "w") as f:
+        f.write(templates[name])
+    print(ok(f"  Created {filename} from template '{name}'.\n"))
+
+def handle_ai_git(user_input):
+    cmd = user_input[len("ai-git"):].strip()
+    if not cmd:
+        print(warn("  Usage: ai-git status/add/commit/push/log/diff/init/clone\n"))
+        return
+    if cmd == "status":
+        subprocess.run(["git", "status"])
+    elif cmd == "add":
+        subprocess.run(["git", "add", "."])
+    elif cmd == "commit":
+        msg = input(c(BBLUE, "  Commit message: ")).strip()
+        if msg:
+            subprocess.run(["git", "commit", "-m", msg])
+        else:
+            print(warn("  Aborted.\n"))
+    elif cmd == "push":
+        subprocess.run(["git", "push"])
+    elif cmd == "log":
+        subprocess.run(["git", "log", "--oneline", "-10"])
+    elif cmd == "diff":
+        subprocess.run(["git", "diff"])
+    elif cmd == "init":
+        subprocess.run(["git", "init"])
+    elif cmd.startswith("clone "):
+        subprocess.run(["git", "clone", cmd[6:].strip()])
+    else:
+        print(warn(f"  Unknown git subcommand: {cmd}\n"))
+    print()
+
 def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram: bool = False):
     """The single command dispatcher shared by the terminal REPL and the
     Telegram bridge, so anything typed in Telegram — ai-help, ai-new,
@@ -2617,6 +2929,39 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
         handle_copy(user_input[len("d-copy"):].strip()); return None
 
     # ── Help ──────────────────────────────────────────────────────────────
+    # ── New commands ──────────────────────────────────────────────────────────
+    if lower == "ai-replit-bot":
+        handle_ai_replit_bot(session)
+        return None
+    if lower.startswith("ai-history"):
+        handle_ai_history(session, user_input)
+        return None
+    if lower == "ai-clear":
+        handle_ai_clear(session)
+        return None
+    if lower == "ai-retry":
+        if not session.get("last_user_message"):
+            print(warn("  No previous user message to retry.\n"))
+            return None
+        print(c(BBLACK, "  Retrying..."))
+        send_message(prov, mod, key, hist, session["last_user_message"])
+        return None
+    if lower == "ai-copy":
+        handle_ai_copy()
+        return None
+    if lower.startswith("ai-search"):
+        handle_ai_search(session, user_input)
+        return None
+    if lower == "ai-cost":
+        handle_ai_cost(session)
+        return None
+    if lower.startswith("ai-template"):
+        handle_ai_template(user_input)
+        return None
+    if lower.startswith("ai-git"):
+        handle_ai_git(user_input)
+        return None
+
     if lower == "ai-help":
         print_help(prompts); return None
 
@@ -2750,6 +3095,7 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
         return None
 
     # ── Default: send to AI ──────────────────────────────────────────────────
+    session["last_user_message"] = user_input
     if session["ai_enabled"]:
         send_message(prov, mod, key, hist, user_input)
     else:
@@ -2785,6 +3131,7 @@ def main():
         "api_key": api_key,
         "model": model,
         "history": [],
+        "last_user_message": "",
         "telegram_token": _parse_cli_telegram_token() or None,
         "ai_enabled": True,
     }

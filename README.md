@@ -5,7 +5,7 @@ A complete AI-powered coding IDE for your terminal. Built for Termux and any Pyt
 ## Features
 
 ### AI-Powered Development
-- **Multi-Provider AI Support**: Works with 8 AI providers
+- **Multi-Provider AI Support**: Works with 17 AI providers!
   - Anthropic Claude
   - Groq
   - Google Gemini
@@ -14,6 +14,15 @@ A complete AI-powered coding IDE for your terminal. Built for Termux and any Pyt
   - Together AI
   - Mistral
   - Cohere
+  - **Pollinations AI** (Free!)
+  - **HuggingFace**
+  - **GitHub Models**
+  - **Cerebras**
+  - **SambaNova**
+  - **Hyperbolic**
+  - **Novita AI**
+  - **Chutes AI**
+  - **Custom Provider** (Connect to any open-source local server. Auto-detects local models available at `http://127.0.0.1:20128/v1/models`!)
 - **Hot-swap providers, models, and API keys** mid-session without restarting
 - **Intelligent context management**: Attach files to chat context for AI-aware editing
 - **AI code generation**: Create new files or edit existing ones with natural language
@@ -181,6 +190,24 @@ python code_with_ai.py
 ## Supported Languages
 
 Python, JavaScript, TypeScript, Java, Kotlin, C, C++, C#, Go, Rust, Ruby, PHP, Swift, Objective-C, Bash, Zsh, PowerShell, HTML, CSS, SCSS, JSON, XML, YAML, TOML, SQL, Markdown, R, Julia, Lua, Perl, Dart, Scala, Vue, Elixir, Haskell, Clojure, Erlang, Nim, Zig, Terraform
+
+## New Features (Latest Update)
+
+### Session & Cost Management
+- `ai-history [N]`: Show the last N (default 10) messages in the chat.
+- `ai-clear`: Clear chat history to save tokens.
+- `ai-retry`: Resend the last user message to the AI.
+- `ai-cost`: Show estimated session token usage.
+
+### Clipboard & External Web
+- **Browser Copy Button**: In web terminals (ttyd), AI outputs are instantly copied to your clipboard via OSC 52.
+- `ai-copy`: Copy the last AI reply to your clipboard via native tools (xclip, pbcopy, termux-clipboard-set).
+- `ai-search <query>`: Search DuckDuckGo from the terminal, display the plain text results, and send them seamlessly to AI.
+
+### Tools & Hosting
+- `ai-template [name]`: Generate immediate project boilerplate for templates like `flask-app`, `telegram-bot`, `cli-tool`, `react-app`, and `fastapi`.
+- `ai-replit-bot`: Designed for cloud hosting (like Replit). Starts a Keep-alive Web server on `:8080` while launching your Telegram bot bridge loop.
+- `ai-git <subcmd>`: Direct shortcut mapped to your local git commands (`status`, `add`, `commit`, `push`, `log`, `diff`, `init`, `clone`).
 
 ## API Keys
 

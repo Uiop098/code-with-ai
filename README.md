@@ -81,6 +81,16 @@ pkg install python
 pip install requests pygments
 ```
 
+### Universal Command (`cwai`)
+You can install a global `cwai` command so you can start the IDE from any folder on your device. Just run the install script:
+
+```bash
+chmod +x install.sh
+./install.sh
+```
+
+Now you can type `cwai` in any directory to instantly launch Code With AI!
+
 ### Download and Run
 
 ```bash

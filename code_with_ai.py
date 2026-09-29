@@ -27,6 +27,23 @@ except ImportError:
     HAS_FLASK = False
 from datetime import datetime
 
+# ─── Optional: readline for arrow-key history ─────────────────────────────────
+try:
+    import readline
+except ImportError:
+    readline = None
+
+if readline:
+    readline.set_auto_history(True)
+    _history_file = os.path.expanduser('~/.code_ai_history')
+    try:
+        readline.read_history_file(_history_file)
+    except (FileNotFoundError, OSError):
+        pass
+    import atexit
+    atexit.register(lambda: readline.write_history_file(_history_file))
+    readline.set_history_length(500)
+
 # ─── Optional dependency: Pygments for syntax highlighting ───────────────────
 try:
     from pygments import highlight
@@ -601,19 +618,146 @@ def get_api_key_for(provider: dict, force_prompt: bool = False) -> str:
         sys.exit(1)
     return key
 
-def choose_model_interactive(provider: dict) -> str:
-    known = provider.get("models", [])
+def discover_new_models(provider_key: str, provider: dict, api_key: str) -> list:
+    """For openai-type providers: GET /models and return newly discovered IDs."""
+    if provider.get("type") != "openai":
+        return []
+    try:
+        endpoint = provider["endpoint"]
+        # Strip '/chat/completions' to get the base URL
+        base = endpoint
+        if base.endswith("/chat/completions"):
+            base = base[:-len("/chat/completions")]
+        models_url = base.rstrip("/") + "/models"
+        headers = {"Authorization": f"Bearer {api_key}"}
+        resp = _requests.get(models_url, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            items = data.get("data", data) if isinstance(data, dict) else data
+            if isinstance(items, list):
+                return [m["id"] for m in items if isinstance(m, dict) and "id" in m]
+    except Exception:
+        pass
+    return []
+
+
+def test_provider_models(provider_key: str, provider: dict, api_key: str, models: list = None) -> list:
+    """Test each model with a tiny ping and return only the working ones."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if models is None:
+        models = list(provider.get("models", []))
+    if not models:
+        return []
+
+    ping_history = [
+        {"role": "user", "content": "ping"},
+    ]
+    # For anthropic, system is separate; for others it's a system message
+    ptype = provider.get("type", "openai")
+
+    def test_one(model):
+        try:
+            if ptype == "anthropic":
+                url = provider["endpoint"]
+                headers = {
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                }
+                body = {"model": model, "max_tokens": 1, "system": "hi",
+                        "messages": [{"role": "user", "content": "ping"}]}
+            elif ptype == "gemini":
+                url = provider["endpoint"].format(model=model) + f"?key={api_key}"
+                headers = {"Content-Type": "application/json"}
+                body = {"contents": [{"role": "user", "parts": [{"text": "ping"}]}],
+                        "generationConfig": {"maxOutputTokens": 1}}
+            elif ptype == "cohere":
+                url = provider["endpoint"]
+                headers = {"Content-Type": "application/json",
+                           "Authorization": "Bearer " + api_key}
+                body = {"model": model, "messages": [{"role": "user", "content": "ping"}]}
+            elif ptype == "pollinations":
+                # Pollinations is always free/available; skip real test
+                return model
+            else:
+                # openai-compatible
+                url = provider["endpoint"]
+                headers = {"Content-Type": "application/json",
+                           "Authorization": "Bearer " + api_key}
+                body = {"model": model, "max_tokens": 1,
+                        "messages": [{"role": "system", "content": "hi"},
+                                     {"role": "user", "content": "ping"}]}
+            resp = _requests.post(url, headers=headers, json=body, timeout=5)
+            if resp.status_code == 200:
+                return model
+        except Exception:
+            pass
+        return None
+
+    working = []
+    use_threads = len(models) > 5
+    if use_threads:
+        with ThreadPoolExecutor(max_workers=min(len(models), 10)) as ex:
+            futures = {ex.submit(test_one, m): m for m in models}
+            for fut in as_completed(futures):
+                result = fut.result()
+                if result:
+                    working.append(result)
+        # Preserve original order
+        order = {m: i for i, m in enumerate(models)}
+        working.sort(key=lambda m: order.get(m, 9999))
+    else:
+        for m in models:
+            result = test_one(m)
+            if result:
+                working.append(result)
+    return working
+
+
+def choose_model_interactive(provider_key: str, provider: dict, api_key: str) -> str:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    known = list(provider.get("models", []))
     default = provider["default_model"]
-    if known:
-        print(f"\n{c(BBLUE,'Known models for')} {provider['name']}:")
-        for i, m in enumerate(known, 1):
-            star = c(BGREEN, " ★") if m == default else ""
-            print(f"  {c(BBLACK, str(i)+'.')} {m}{star}")
-    choice = input(f"  Model (Enter for {c(BGREEN, default)}): ").strip()
+
+    print(f"\n{c(BBLUE,'  Testing models...')}", flush=True)
+
+    # Discover new models for openai-type providers
+    new_models = discover_new_models(provider_key, provider, api_key)
+    all_models = list(dict.fromkeys(known + [m for m in new_models if m not in known]))
+
+    working = test_provider_models(provider_key, provider, api_key, all_models)
+
+    if not working:
+        # Fallback: show all known if testing failed entirely
+        working = all_models if all_models else [default]
+
+    # Persist newly discovered working models back into provider
+    if new_models:
+        for m in new_models:
+            if m in working and m not in provider["models"]:
+                provider["models"].append(m)
+        cfg = load_config()
+        cfg.setdefault("provider_models", {})[provider_key] = provider["models"]
+        save_config(cfg)
+
+    # Save the working list
+    cfg = load_config()
+    cfg.setdefault("working_models", {})[provider_key] = working
+    save_config(cfg)
+
+    print(f"\n{c(BBLUE,'Working models for')} {provider['name']}:")
+    for i, m in enumerate(working, 1):
+        star = c(BGREEN, " ★") if m == default else ""
+        print(f"  {c(BBLACK, str(i)+'.')} {m}{star}")
+
+    choice = input(f"  Model (Enter for {c(BGREEN, default if default in working else working[0])}): ").strip()
+    effective_default = default if default in working else working[0]
     if not choice:
-        return default
-    if choice.isdigit() and known and 1 <= int(choice) <= len(known):
-        return known[int(choice)-1]
+        return effective_default
+    if choice.isdigit() and 1 <= int(choice) <= len(working):
+        return working[int(choice)-1]
     return choice
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3110,10 +3254,44 @@ def main():
     global ai_on_terminal
 
     # ── Startup: pick provider / key / model ──────────────────────────────────
-    provider_key = choose_provider_interactive()
+    provider_key = None
+    api_key = None
+    model = None
+
+    cfg = load_config()
+    last_provider_key = cfg.get("last_provider")
+    if last_provider_key and last_provider_key in PROVIDERS:
+        last_model = get_last_model(last_provider_key)
+        last_pname = PROVIDERS[last_provider_key]["name"]
+        prompt_str = f"  Last session: {c(BWHITE, last_pname)} / {c(BGREEN, last_model or 'default')}. Continue? [Y/n]: "
+        try:
+            resume = input(prompt_str).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            resume = "n"
+        if resume in ("", "y", "yes"):
+            provider_key = last_provider_key
+            provider = PROVIDERS[provider_key]
+            saved_key, _ = get_saved_provider_key(provider_key)
+            if saved_key:
+                api_key = decrypt_api_key(saved_key)
+            else:
+                api_key = get_api_key_for(provider)
+            model = last_model or provider["default_model"]
+
+    if provider_key is None:
+        provider_key = choose_provider_interactive()
+        provider = PROVIDERS[provider_key]
+        api_key = get_api_key_for(provider)
+        model = choose_model_interactive(provider_key, provider, api_key)
+
     provider = PROVIDERS[provider_key]
-    api_key = get_api_key_for(provider)
-    model = choose_model_interactive(provider)
+
+    # Persist session info for next startup
+    save_provider_key(provider_key, api_key, model)
+    save_last_model(provider_key, model)
+    cfg = load_config()
+    cfg["last_provider"] = provider_key
+    save_config(cfg)
 
     session = {
         "provider_key": provider_key,

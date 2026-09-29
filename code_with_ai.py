@@ -3390,8 +3390,6 @@ def main():
             break
 
 
-if __name__ == "__main__":
-    main()
 
 
 
@@ -3522,3 +3520,5 @@ def _init_commands():
                 if cmd != "(just type)":
                     cmds[cmd] = desc
     return cmds
+if __name__ == "__main__":
+    main()

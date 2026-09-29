@@ -1154,147 +1154,181 @@ def _read_multiline_block():
     return "\n".join(buf)
 
 
-def handle_view_editor(path: str, provider=None, model=None, api_key=None, history=None, start_with_ai=False):
-    """Full manual, in-Termux editor: view with syntax colors, edit/insert/
-    delete lines, paste a whole new body, save — and ask the AI for help
-    or a rewrite at any point without leaving the editor. start_with_ai=True
-    (used by '!!aieditor' / 'e/ai') jumps straight to the 'ai' prompt."""
-    ok_r, content = read_text_file(path)
-    if not ok_r:
-        # File doesn't exist yet — offer to create it right here.
-        if input(f"  {path} doesn't exist. Create it now? [y/N]: ").strip().lower() != "y":
-            return
-        write_text_file(path, "")
-        content = ""
-    lang = detect_lang(path)
-    name = os.path.basename(resolve_path(path))
-    dirty = False
+def handle_view_editor(farg: str, provider: dict, model: str, api_key: str, history: list, session: dict = None, start_with_ai=False):
+    from prompt_toolkit.widgets import TextArea
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.layout import Layout, HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
 
-    def render():
-        lines = content.splitlines()
-        total = len(lines)
-        print(f"\n{header_bar(f' {name} [{lang}] — {total} lines' + (' *unsaved' if dirty else ''), BBLUE)}")
-        if content.strip():
-            print_code(content, lang, show_line_nums=True)
-        else:
-            print(dim("  (empty file)"))
-        print(divider())
-
-    render()
-    print(dim("  Commands: [e]dit line  [i]nsert  [d]elete line  [p]aste whole file  "
-              "[ai] ask AI  [v]iew again  [w]rite save  [q]uit"))
-
-    pending_cmd = "ai" if start_with_ai else None
+    path = os.path.abspath(farg)
+    
     while True:
-        lines = content.splitlines()
-        total = len(lines)
-        if pending_cmd:
-            cmd = pending_cmd
-            pending_cmd = None
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
         else:
-            cmd = input(f"  {c(BCYAN,'editor')}> ").strip().lower()
+            if not os.path.exists(os.path.dirname(path)) and os.path.dirname(path) != "":
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+            content = ""
 
-        if cmd in ("q", "quit"):
-            if dirty:
-                if input("  Unsaved changes — quit anyway? [y/N]: ").strip().lower() != "y":
-                    continue
+        text_area = TextArea(
+            text=content,
+            scrollbar=True,
+            line_numbers=True,
+            lexer=None
+        )
+
+        kb = KeyBindings()
+        
+        def _add_pair(key, pair):
+            @kb.add(key)
+            def _(event):
+                event.current_buffer.insert_text(pair)
+                event.current_buffer.cursor_position -= 1
+                
+        def _add_same_pair(key, pair):
+            @kb.add(key)
+            def _(event):
+                event.current_buffer.insert_text(pair)
+                event.current_buffer.cursor_position -= 1
+                
+        _add_pair('(', '()')
+        _add_pair('{', '{}')
+        _add_pair('[', '[]')
+        _add_same_pair('"', '""')
+        _add_same_pair("'", "''")
+
+        @kb.add("c-x")
+        def _(event):
+            event.app.exit(result="exit")
+            
+        @kb.add("c-s")
+        def _(event):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text_area.text)
+            
+        @kb.add("c-r")
+        def _(event):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text_area.text)
+            event.app.exit(result="run")
+            
+        @kb.add("c-n")
+        def _(event):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text_area.text)
+            event.app.exit(result="nano")
+            
+        @kb.add("c-a")
+        def _(event):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text_area.text)
+            event.app.exit(result="ai")
+            
+        menu = Window(
+            height=1,
+            content=FormattedTextControl(
+                " Ctrl+S: Save | Ctrl+X: Exit | Ctrl+R: Run | Ctrl+A: Ask AI | Ctrl+N: Nano"
+            ),
+            style="class:status",
+        )
+
+        root = HSplit([text_area, menu])
+        app = Application(
+            layout=Layout(root),
+            key_bindings=kb,
+            full_screen=True,
+            mouse_support=True
+        )
+
+        # Handle 'start_with_ai' param gracefully
+        if start_with_ai:
+            res = "ai"
+            start_with_ai = False
+        else:
+            res = app.run()
+
+        if res == "exit":
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text_area.text)
+            print(f"Saved {path}")
             break
-
-        elif cmd in ("v", "view"):
-            render()
-
-        elif cmd.startswith("e"):
-            try:
-                ln = int(input("  Line number: ").strip())
-                if 1 <= ln <= total:
-                    print(f"  Current: {c(BBLACK, lines[ln-1])}")
-                    new_line = input("  New content: ")
-                    lines[ln-1] = new_line
-                    content = "\n".join(lines)
-                    dirty = True
-                    print_code("\n".join(lines[max(0, ln-3):ln+2]), lang)
-                else:
-                    print(warn("  Line out of range"))
-            except (ValueError, EOFError):
-                print(warn("  Enter a number"))
-
-        elif cmd.startswith("i"):
-            try:
-                ln = int(input("  Insert before line # (0 = end of file): ").strip())
-                new_line = input("  Line content: ")
-                if ln == 0 or ln > total:
-                    lines.append(new_line)
-                else:
-                    lines.insert(max(0, ln-1), new_line)
-                content = "\n".join(lines)
-                dirty = True
-                render()
-            except (ValueError, EOFError):
-                print(warn("  Enter a number"))
-
-        elif cmd.startswith("d"):
-            try:
-                ln = int(input("  Line number to delete: ").strip())
-                if 1 <= ln <= total:
-                    removed = lines.pop(ln-1)
-                    content = "\n".join(lines)
-                    dirty = True
-                    print(ok(f"  Removed: {removed}"))
-                else:
-                    print(warn("  Line out of range"))
-            except (ValueError, EOFError):
-                print(warn("  Enter a number"))
-
-        elif cmd.startswith("p"):
-            content = _read_multiline_block()
-            dirty = True
-            render()
-
-        elif cmd in ("ai", "a"):
-            if not (provider and model and api_key is not None and history is not None):
-                print(warn("  AI isn't available in this context.\n")); continue
-            instructions = input("  Ask AI (question, or 'rewrite: <instructions>'): ").strip()
-            if not instructions:
-                continue
-            if instructions.lower().startswith("rewrite:") or instructions.lower().startswith("edit:"):
-                task = instructions.split(":", 1)[1].strip()
-                prompt = (
-                    f"Here is the current content of {path} (language: {lang}), "
-                    f"being edited live in a terminal editor:\n\n```{lang}\n{content}\n```\n\n"
-                    f"Task: {task}\n\nReply with ONLY the complete updated file content "
-                    "in a single fenced code block, nothing else."
-                )
-                print(c(BBLUE, "  Asking AI…"))
-                reply = send_message(provider, model, api_key, history, prompt, silent=True)
-                if reply is None:
-                    continue
-                new_content = extract_code_from_reply(reply)
-                print(f"\n{header_bar(' AI suggested change ', BYELLOW)}")
-                changed = show_diff(content, new_content, path)
-                if changed and input("  Apply this to the editor buffer? [y/N]: ").strip().lower() == "y":
-                    content = new_content
-                    dirty = True
-                    render()
+            
+        elif res == "nano":
+            import os
+            os.system(f"nano '{path}'")
+            
+        elif res == "run":
+            import os, subprocess, sys
+            print(f"\n> Running {path}...\n")
+            ext = os.path.splitext(path)[1].lower()
+            cmd = None
+            if ext == ".py": cmd = ["python3", path]
+            elif ext == ".js": cmd = ["node", path]
+            elif ext == ".sh": cmd = ["bash", path]
+            elif ext == ".rb": cmd = ["ruby", path]
+            elif ext in (".c", ".cpp"):
+                cc = "gcc" if ext == ".c" else "g++"
+                tmp = "/tmp/a.out"
+                if subprocess.call([cc, path, "-o", tmp]) == 0:
+                    cmd = [tmp]
+                
+            if cmd:
+                print(f"Executing: {' '.join(cmd)}\n")
+                try:
+                    p = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
+                    if p.stderr:
+                        sys.stdout.write(p.stderr)
+                        sys.stdout.flush()
+                        
+                    if p.returncode != 0:
+                        ans = input(f"\n[Command failed] Ask AI to analyze and fix the syntax error? [Y/n]: ")
+                        if ans.lower() in ('', 'y', 'yes'):
+                            if session: ensure_ai_ready(session)
+                            prompt = f"Executing {os.path.basename(path)} failed:\n\n{p.stderr}\n\nFix the error in this file.\nReturn ONLY the replacement script inside a markdown code block. Do not add outside chatter."
+                            print("\nAsking AI for fix...")
+                            reply = send_message(session["provider"], session["model"], session["api_key"], [], prompt, silent=True, include_context=True)
+                            
+                            if reply:
+                                extracted = extract_code_from_reply(reply)
+                                if extracted:
+                                    with open(path, "w", encoding="utf-8") as f:
+                                        f.write(extracted)
+                                    print("\nAI applied fix! Reloading in editor...")
+                except KeyboardInterrupt:
+                    pass
             else:
-                # Plain question about the file — answered without touching the buffer.
+                print("No quick-runner defined for this extension.")
+            
+            input("\nPress Enter to return to editor...")
+            
+        elif res == "ai":
+            if session: ensure_ai_ready(session)
+            instr = input(f"\n[AI] What do you want to change in {path}? ")
+            if instr.strip():
+                with open(path, "r", encoding="utf-8") as f:
+                    curr = f.read()
+                    
                 prompt = (
-                    f"I'm editing {path} (language: {lang}) in a terminal editor. "
-                    f"Current content:\n\n```{lang}\n{content}\n```\n\nQuestion: {instructions}"
+                    f"File '{path}' content:\n```\n{curr}\n```\n\n"
+                    f"Task: {instr}\n\n"
+                    "Rewrite the file to apply these changes. Return ONLY valid text/code inside a SINGLE markdown block. Do not use diffs."
                 )
-                send_message(provider, model, api_key, history, prompt)
+                print("\nThinking...")
+                reply = send_message(session["provider"], session["model"], session["api_key"], [], prompt, silent=True, include_context=False)
+                if reply:
+                    new_code = extract_code_from_reply(reply)
+                    if new_code:
+                        with open(path, "w", encoding="utf-8") as f:
+                            f.write(new_code)
+                        print("\nModified file successfully.")
+                    else:
+                        print("Error: No code block returned by AI.")
+                        
+            input("\nPress Enter to return to editor...")
 
-        elif cmd in ("w", "write", "save"):
-            full = write_text_file(path, content)
-            if resolve_path(path) in attached_files:
-                attached_files[resolve_path(path)]["content"] = content
-            dirty = False
-            print(ok(f"  Saved: {full}"))
 
-        elif cmd == "":
-            continue
-        else:
-            print(dim("  Commands: e / i / d / p / ai / v / w / q"))
-    print()
 
 def handle_view_raw(path: str):
     ok_r, content = read_text_file(path)
@@ -2592,101 +2626,101 @@ HELP_TEXT = """
   {C}(just type){R}           Send a message to the AI
   {C}/ai{R}                  Enable AI responses   (default on)
   {C}/noai{R}                Disable AI (chat commands still work)
-  {C}ai-status{R}            Show current provider / model / key
+  {C}/status{R}            Show current provider / model / key
 
 {B}PROVIDER / MODEL / KEY  (switch anytime){R}
-  {C}ai-provider{R}          Switch AI provider
-  {C}ai-model{R}             Switch model (same provider)
-  {C}ai-key{R}               Update API key (same provider)
+  {C}/provider{R}          Switch AI provider
+  {C}/model{R}             Switch model (same provider)
+  {C}/key{R}               Update API key (same provider)
 
 {B}MODE SWITCHES{R}
   {C}!!ai{R}                  Drop into a bare AI-only chat (no commands);
-                     type 'ai-full' inside it to come back
+                     type '/full' inside it to come back
   {C}!!editor <file>{R}       Open the manual in-Termux editor directly
   {C}!!aieditor <file>{R}     Same, but jumps straight to the editor's
                      'ai' prompt — same as 'e/ai <file>'
   {C}e/ai <file>{R}           Alias for !!aieditor
 
 {B}FILES & FOLDERS{R}
-  {C}ai-pwd{R}               Show current directory
-  {C}ai-cd <dir>{R}          Change directory
-  {C}ai-ls [dir]{R}          List files with info
-  {C}ai-mkdir <dir>{R}       Create folder
-  {C}ai-tree [dir]{R}        Folder tree
-  {C}ai-file <file>{R}       Open file actions menu (view/AI/run/delete/…)
-  {C}ai-editor <file>{R}     Manual line editor, directly in Termux — has
+  {C}/pwd{R}               Show current directory
+  {C}/cd <dir>{R}          Change directory
+  {C}/ls [dir]{R}          List files with info
+  {C}/mkdir <dir>{R}       Create folder
+  {C}/tree [dir]{R}        Folder tree
+  {C}/file <file>{R}       Open file actions menu (view/AI/run/delete/…)
+  {C}/editor <file>{R}     Manual line editor, directly in Termux — has
                      its own 'ai' command to ask/rewrite mid-edit
   {C}e-open <file|dir>{R}    Open a file in the editor; if given a folder,
                      lists it and asks which file to open
-  {C}ai-open <file>{R}       Attach file to AI context
-  {C}ai-close <file|all>{R}  Detach file(s) from context
-  {C}ai-files{R}             List attached files
-  {C}ai-lang <f> <lang>{R}   Override detected language
+  {C}/open <file>{R}       Attach file to AI context
+  {C}/close <file|all>{R}  Detach file(s) from context
+  {C}/files{R}             List attached files
+  {C}/lang <f> <lang>{R}   Override detected language
 
 {B}AI EXPLAIN / DEBUG / CHECK{R}
-  {C}ai-explain <f|dir> [-s|-l]{R}   AI explains a file or whole folder
+  {C}/explain <f|dir> [-s|-l]{R}   AI explains a file or whole folder
                      -s short (default), -l long/detailed
-  {C}eai-explain{R}          Same as ai-explain — for use inside editor flows
-  {C}ai-debug <file>{R}      AI finds bugs with line numbers + reasons,
-                     then offers to hand off to ai-edit to fix them
-  {C}eai-debug{R}            Same as ai-debug
-  {C}ai-check <f|dir>{R}     Direct syntax/compile check, no editor, no run —
+  {C}eai-explain{R}          Same as /explain — for use inside editor flows
+  {C}/debug <file>{R}      AI finds bugs with line numbers + reasons,
+                     then offers to hand off to /edit to fix them
+  {C}eai-debug{R}            Same as /debug
+  {C}/check <f|dir>{R}     Direct syntax/compile check, no editor, no run —
                      exact file/line/column + reason per issue
-  {C}eai-check{R}            Same as ai-check
+  {C}eai-check{R}            Same as /check
 
 {B}HISTORY & SESSION{R}
-  {C}ai-history [N]{R}      Show last N chat messages (default 10)
-  {C}ai-clear{R}           Clear chat history
-  {C}ai-retry{R}           Resend last user message
-  {C}ai-copy{R}            Copy last AI reply to clipboard
-  {C}ai-cost{R}            Show estimated session token usage
+  {C}/history [N]{R}      Show last N chat messages (default 10)
+  {C}/clear{R}           Clear chat history
+  {C}/retry{R}           Resend last user message
+  {C}/copy{R}            Copy last AI reply to clipboard
+  {C}/cost{R}            Show estimated session token usage
 
 {B}SEARCH & WEB{R}
-  {C}ai-search <query>{R}  Search DuckDuckGo, show top results, optionally ask AI
+  {C}/search <query>{R}  Search DuckDuckGo, show top results, optionally ask AI
 
 {B}CODE TEMPLATES{R}
-  {C}ai-template [name]{R} Generate boilerplate (flask-app, telegram-bot, cli-tool, react-app, fastapi)
+  {C}/template [name]{R} Generate boilerplate (flask-app, telegram-bot, cli-tool, react-app, fastapi)
 
 {B}GIT SHORTCUTS{R}
-  {C}ai-git <subcmd>{R}    Shortcuts: status/add/commit/push/log/diff/init/clone
+  {C}/git <subcmd>{R}    Shortcuts: status/add/commit/push/log/diff/init/clone
 
 {B}FILE OPERATIONS{R}
-  {C}d-rename <f|dir>{R}     Rename (asks for the new name)
-  {C}d-reformat <file>{R}    Change format/extension; optionally has AI
+  {C}/rename <f|dir>{R}     Rename (asks for the new name)
+  {C}/reformat <file>{R}    Change format/extension; optionally has AI
                      convert the content to match (e.g. .html → .php)
-  {C}d-zip <f|dir>{R}        Archive as .zip (built-in) or .7z (needs p7zip)
-  {C}d-unzip <archive>{R}    Extract a .zip or .7z (asks destination)
-  {C}d-move <f|dir>{R}       Move (asks destination path)
-  {C}d-copy <f|dir>{R}       Copy (asks destination path)
+  {C}/zip <f|dir>{R}        Archive as .zip (built-in) or .7z (needs p7zip)
+  {C}/unzip <archive>{R}    Extract a .zip or .7z (asks destination)
+  {C}/move <f|dir>{R}       Move (asks destination path)
+  {C}/copy <f|dir>{R}       Copy (asks destination path)
 
 {B}AI EDITING{R}
-  {C}ai-edit <file> [instr]{R}   AI modifies file → diff → confirm save
-  {C}ai-new <file> [instr]{R}    AI generates new file → preview → save
-  {C}ai-save-as <file>{R}        Save last AI reply to a file
+  {C}/edit <file> [instr]{R}   AI modifies file → diff → confirm save
+  {C}/new <file> [instr]{R}    AI generates new file → preview → save
+  {C}/save-as <file>{R}        Save last AI reply to a file
 
 {B}RUNNING CODE{R}
-  {C}ai-run <file>{R}        Compiles/checks first (exact file/line/column +
+  {C}/run <file>{R}        Compiles/checks first (exact file/line/column +
                      reason on any error), then runs FULLY INTERACTIVELY —
                      scanf/input()/cin/Scanner all work live, output streams
                      until the program or its loop finishes
                      Supported: Python, Node, Bash, Ruby, PHP, Lua,
                      Perl, R, Julia, Dart, Go, Java, Kotlin, Scala,
                      Elixir, Nim, Zig, Rust (rustc), C (gcc), C++ (g++)
-  {C}d-run <file>{R}         Same as ai-run — short alias
+  {C}/run <file>{R}         Same as /run — short alias
 
 {B}RUN ON LOCALHOST (web files){R}
-  {C}ai-serve [dir] [port] [host]{R}
+  {C}/serve [dir] [port] [host]{R}
                      Serve a folder on http://HOST:PORT
                      (default: current dir, port 8080, host 127.0.0.1).
-                     Shorthand: 'ai-serve :9000' or 'ai-serve 0.0.0.0:9000'.
+                     Shorthand: '/serve :9000' or '/serve 0.0.0.0:9000'.
                      If the port is busy, a free one is picked automatically.
                      Several servers can run at once, each on its own port.
                      Executes .php via PHP's built-in server; serves
                      .html/.css/.js/images/etc. as static files automatically.
-  {C}d-serve [dir] [port] [host]{R}  Same as ai-serve — short alias
-  {C}ai-stopserve{R}         Stop ALL running servers
-  {C}ai-stopserve :PORT{R}   Stop only the server on that port
-  {C}ai-servelog{R}          List every server currently running
+  {C}/serve [dir] [port] [host]{R}  Same as /serve — short alias
+  {C}/stopserve{R}         Stop ALL running servers
+  {C}/stopserve :PORT{R}   Stop only the server on that port
+  {C}/servelog{R}          List every server currently running
 
 {B}TELEGRAM BOT BRIDGE{R}
   {C}tbot-token{R}            Set/change the bot token — asked right here in
@@ -2696,23 +2730,23 @@ HELP_TEXT = """
                      {C}tbot-token clear{R} removes it for this session.
                      Launch flag for a fast start: {C}--tbot-token YOUR_TOKEN{R}
                      (or set TELEGRAM_BOT_TOKEN in the environment).
-  {C}ai-telegram{R}          Connect this AI session to a Telegram bot
+  {C}/telegram{R}          Connect this AI session to a Telegram bot
                      using the token from tbot-token / --tbot-token / env,
                      or asks once if none is set. /status and /stop
                      work from Telegram; Ctrl+C here also stops it.
 
 {B}TERMINAL{R}
   {C}!<command>{R}           Run any shell command  (e.g. !npm install)
-  {C}ai-terminal{R}          Toggle AI analysis of terminal output (on/off)
+  {C}/terminal{R}          Toggle AI analysis of terminal output (on/off)
 
 {B}SAVED PROMPTS{R}
-  {C}ai-save{R}              Save a reusable prompt
-  {C}ai-list{R}              List saved prompts
-  {C}ai-del <name>{R}        Delete a saved prompt
+  {C}/save{R}              Save a reusable prompt
+  {C}/list{R}              List saved prompts
+  {C}/del <name>{R}        Delete a saved prompt
   {C}-<name>{R}              Run a saved prompt (e.g. -myfix)
 
 {B}GENERAL{R}
-  {C}ai-help{R}              Show this help
+  {C}/help{R}              Show this help
   {C}exit / quit{R}          Exit
 
 """
@@ -3280,10 +3314,13 @@ def _parse_cli_telegram_token() -> str:
     return os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
 
-def main():
-    global ai_on_terminal
 
-    # ── Startup: pick provider / key / model ──────────────────────────────────
+
+def ensure_ai_ready(session):
+    if session.get("provider_key") and session.get("api_key"):
+        return
+
+    print()
     provider_key = None
     api_key = None
     model = None
@@ -3316,18 +3353,28 @@ def main():
 
     provider = PROVIDERS[provider_key]
 
-    # Persist session info for next startup
     save_provider_key(provider_key, api_key, model)
     save_last_model(provider_key, model)
     cfg = load_config()
     cfg["last_provider"] = provider_key
     save_config(cfg)
 
+    session["provider_key"] = provider_key
+    session["provider"] = provider
+    session["api_key"] = api_key
+    session["model"] = model
+
+    print_banner(provider["name"], model)
+
+
+def main():
+    global ai_on_terminal
+
     session = {
-        "provider_key": provider_key,
-        "provider": provider,
-        "api_key": api_key,
-        "model": model,
+        "provider_key": None,
+        "provider": None,
+        "api_key": None,
+        "model": None,
         "history": [],
         "last_user_message": "",
         "telegram_token": _parse_cli_telegram_token() or None,
@@ -3335,26 +3382,25 @@ def main():
     }
 
     prompts = load_prompts()
+    print_banner("No Provider", "No Model")
 
-    print_banner(provider["name"], model)
-
-    # ── Startup mode: Code Editor / Chat with AI / AI only ─────────────────────
     startup_mode = choose_startup_mode()
     if startup_mode == "editor":
         farg = input("  File to open (created if it doesn't exist): ").strip()
         if farg:
-            handle_view_editor(farg, provider, model, api_key, session["history"])
+            handle_view_editor(farg, None, None, None, session["history"], session=session)
         print(dim("  Dropping into the full chat + command experience now.\n"))
     elif startup_mode == "ai_only":
+        ensure_ai_ready(session)
         result = run_ai_only_chat(session)
         if result != "full":
-            return   # they typed exit/quit or Ctrl+C inside AI-only mode
+            return
         print_banner(session["provider"]["name"], session["model"])
+    elif startup_mode == "chat":
+        ensure_ai_ready(session)
 
-    # ── REPL ──────────────────────────────────────────────────────────────────
     while True:
-        # Prompt indicator
-        ai_badge = c(BGREEN,"●AI") if session["ai_enabled"] else c(BRED,"●AI-off")
+        ai_badge = c(BGREEN,"●AI") if session.get("ai_enabled") else c(BRED,"●AI-off")
         term_badge = c(BCYAN," T") if ai_on_terminal else ""
         attached_badge = (c(BBLUE, f" [{len(attached_files)}f]") if attached_files else "")
         prompt_line = (
@@ -3363,7 +3409,6 @@ def main():
             f"{c(BBLUE+BOLD,'❯')} "
         )
         try:
-            # Initialize session if not exists
             if 'pt_session' not in session:
                 try:
                     cmd_dict = _init_commands()
@@ -3391,28 +3436,26 @@ def main():
 
 
 
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # COMMAND PALETTE COMPLETER (prompt_toolkit)
 # ═══════════════════════════════════════════════════════════════════════════════
+
 class CommandPaletteCompleter(Completer):
-    """Provides autocomplete for all cwai commands.
-    Typing '/' shows filtered commands with descriptions.
-    Typing 'ai-' or any prefix also autocompletes."""
     def __init__(self, cmd_dict):
         self.cmd_dict = cmd_dict
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
         if text.startswith('/'):
-            word = text[1:].lower()
+            word = text.lower()  # word includes the slash
             for cmd, desc in self.cmd_dict.items():
-                if not word or word in cmd.lower() or word in desc.lower():
+                if not cmd.startswith('/'):
+                    continue
+                if not word or word in cmd.lower() or word[1:] in desc.lower():
                     yield Completion(
                         cmd,
                         start_position=-len(text),
-                        display=f"/{cmd}",
+                        display=cmd,
                         display_meta=desc,
                     )
         else:
@@ -3426,9 +3469,6 @@ class CommandPaletteCompleter(Completer):
                     )
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# INTERACTIVE FILE MANAGER (prompt_toolkit full-screen TUI)
-# ═══════════════════════════════════════════════════════════════════════════════
 def get_path_interactively(start_path="."):
     import shutil
     current_dir = os.path.abspath(start_path)

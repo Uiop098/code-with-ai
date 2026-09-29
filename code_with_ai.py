@@ -20,6 +20,26 @@ Dependencies used if installed: requests (required), pygments (syntax colors)
 """
 
 import os, sys, re, json, shutil, socket, signal, difflib, getpass, subprocess, textwrap, shlex, time, io, contextlib, zipfile, threading, base64
+
+def check_dependencies():
+    required = ['requests', 'pygments', 'prompt_toolkit', 'flask', 'telebot']
+    missing = []
+    for pkg in required:
+        try: __import__(pkg)
+        except ImportError: missing.append('pyTelegramBotAPI' if pkg == 'telebot' else pkg)
+    
+    if missing:
+        print(f"\nInstalling missing dependencies: {', '.join(missing)}...\n")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
+            print("\nDependencies installed successfully! Resuming startup...\n")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        except Exception as e:
+            print(f"\nFailed to auto-install dependencies: {e}")
+            print("Please run manually: pip install requests pygments prompt_toolkit flask pyTelegramBotAPI")
+            sys.exit(1)
+
+check_dependencies()
 try:
     from flask import Flask
     HAS_FLASK = True
@@ -1279,20 +1299,24 @@ def handle_view_editor(farg: str, provider: dict, model: str, api_key: str, hist
             elif ext == ".sh": cmd = ["bash", path]
             elif ext == ".rb": cmd = ["ruby", path]
             elif ext in (".c", ".cpp"):
+                import tempfile
                 cc = "gcc" if ext == ".c" else "g++"
-                tmp = os.path.splitext(path)[0] + ".out"
+                fd, tmp = tempfile.mkstemp(suffix=".out")
+                os.close(fd)
                 cp = subprocess.run([cc, path, "-o", tmp, "-lm"], capture_output=True, text=True)
                 if cp.returncode == 0:
-                    cmd = [os.path.abspath(tmp)]
+                    cmd = [tmp]
                 else:
                     print(cp.stderr)
                     err_text = cp.stderr
             elif ext == ".java": cmd = ["java", path]
             elif ext == ".go": cmd = ["go", "run", path]
             elif ext == ".rs":
-                tmp = os.path.splitext(path)[0] + ".out"
+                import tempfile
+                fd, tmp = tempfile.mkstemp(suffix=".out")
+                os.close(fd)
                 cp = subprocess.run(["rustc", path, "-o", tmp], capture_output=True, text=True)
-                if cp.returncode == 0: cmd = [os.path.abspath(tmp)]
+                if cp.returncode == 0: cmd = [tmp]
                 else: print(cp.stderr); err_text = cp.stderr
                 
             if cmd:

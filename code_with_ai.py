@@ -624,13 +624,6 @@ def build_request(provider: dict, model: str, api_key: str, history: list):
         headers = {"Content-Type": "application/json"}
         body = {"messages": history, "jsonMode": False, "model": model}
         return url, headers, body
-    if ptype == "pollinations":
-        if data.get("_pollinations_text"):
-            return data["_pollinations_text"]
-        try:
-            return data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError):
-            return ""
     if ptype == "anthropic":
         url = provider["endpoint"]
         headers = {
@@ -666,11 +659,6 @@ def build_request(provider: dict, model: str, api_key: str, history: list):
 
 def extract_reply(provider: dict, data: dict) -> str:
     ptype = provider["type"]
-    if ptype == "pollinations":
-        url = provider["endpoint"]
-        headers = {"Content-Type": "application/json"}
-        body = {"messages": history, "jsonMode": False, "model": model}
-        return url, headers, body
     if ptype == "pollinations":
         if data.get("_pollinations_text"):
             return data["_pollinations_text"]

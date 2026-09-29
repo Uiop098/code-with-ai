@@ -422,7 +422,7 @@ PROVIDERS = {
         "default_model": "openai",
         "env_var": "POLLINATIONS_API_KEY",
         "key_url": "pollinations.ai",
-        "models": ["openai", "mistral", "claude", "gemini"],
+        "models": ["openai", "openai-fast"],
         "free": True,
     },
     "huggingface": {
@@ -588,6 +588,8 @@ def choose_provider_interactive() -> str:
     return PROVIDER_ORDER[0]
 
 def get_api_key_for(provider: dict, force_prompt: bool = False) -> str:
+    if provider.get("free"):
+        return "anonymous"
     if not force_prompt:
         key = os.environ.get(provider["env_var"], "")
         if key:

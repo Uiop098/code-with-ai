@@ -37,6 +37,7 @@ from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 from prompt_toolkit.shortcuts import CompleteStyle
+from prompt_toolkit.shortcuts import PromptSession
 from prompt_toolkit.formatted_text import ANSI
 
 
@@ -3394,13 +3395,121 @@ if __name__ == "__main__":
 
 
 
-# Build COMMANDS for completion
-import re
-_commands_dict = {}
-try:
-    _m = re.search(r"HELP_TEXT\s*=\s*(?:f?\"\"\")[\s\S]*?(?:\"\"\")", globals().get('HELP_TEXT', '') or "")
-    # Actually wait, we can just parse the module's HELP_TEXT at module level...
-except: pass
+# ═══════════════════════════════════════════════════════════════════════════════
+# COMMAND PALETTE COMPLETER (prompt_toolkit)
+# ═══════════════════════════════════════════════════════════════════════════════
+class CommandPaletteCompleter(Completer):
+    """Provides autocomplete for all cwai commands.
+    Typing '/' shows filtered commands with descriptions.
+    Typing 'ai-' or any prefix also autocompletes."""
+    def __init__(self, cmd_dict):
+        self.cmd_dict = cmd_dict
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        if text.startswith('/'):
+            word = text[1:].lower()
+            for cmd, desc in self.cmd_dict.items():
+                if not word or word in cmd.lower() or word in desc.lower():
+                    yield Completion(
+                        cmd,
+                        start_position=-len(text),
+                        display=f"/{cmd}",
+                        display_meta=desc,
+                    )
+        else:
+            word = document.get_word_before_cursor(WORD=False)
+            for cmd, desc in self.cmd_dict.items():
+                if cmd.lower().startswith(word.lower()) and word:
+                    yield Completion(
+                        cmd,
+                        start_position=-len(word),
+                        display_meta=desc,
+                    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# INTERACTIVE FILE MANAGER (prompt_toolkit full-screen TUI)
+# ═══════════════════════════════════════════════════════════════════════════════
+def get_path_interactively(start_path="."):
+    """Full-screen file/folder picker. Arrow Up/Down with wraparound,
+    Enter to open folder or select file, Esc/q/Ctrl-C to cancel."""
+    current_dir = os.path.abspath(start_path)
+    selected_idx = [0]
+    entries = [[]]
+
+    def refresh_entries():
+        try:
+            items = sorted(os.listdir(current_dir))
+        except PermissionError:
+            items = []
+        entries[0] = [".."] + items
+        selected_idx[0] = 0
+
+    refresh_entries()
+
+    def get_formatted_text():
+        lines = [("class:title", f" 📂 {current_dir} \n")]
+        lines.append(("class:hint", " ↑↓ move  Enter select  q cancel\n\n"))
+        for i, e in enumerate(entries[0]):
+            full = os.path.join(current_dir, e)
+            is_dir = os.path.isdir(full)
+            icon = "📁 " if is_dir else "📄 "
+            if i == selected_idx[0]:
+                lines.append(("class:selected", f"  ❯ {icon}{e}\n"))
+            else:
+                lines.append(("class:entry", f"    {icon}{e}\n"))
+        return lines
+
+    text_ctrl = FormattedTextControl(get_formatted_text)
+    layout = Layout(HSplit([Window(content=text_ctrl)]))
+    kb = KeyBindings()
+
+    @kb.add("up")
+    def _up(event):
+        selected_idx[0] = (selected_idx[0] - 1) % max(1, len(entries[0]))
+
+    @kb.add("down")
+    def _down(event):
+        selected_idx[0] = (selected_idx[0] + 1) % max(1, len(entries[0]))
+
+    @kb.add("enter")
+    @kb.add("right")
+    def _enter(event):
+        nonlocal current_dir
+        if not entries[0]:
+            event.app.exit(result=current_dir)
+            return
+        chosen = entries[0][selected_idx[0]]
+        full = os.path.normpath(os.path.join(current_dir, chosen))
+        if os.path.isdir(full):
+            current_dir = full
+            refresh_entries()
+        else:
+            event.app.exit(result=full)
+
+    @kb.add("left")
+    def _left(event):
+        nonlocal current_dir
+        current_dir = os.path.dirname(current_dir)
+        refresh_entries()
+
+    @kb.add("c-c")
+    @kb.add("escape")
+    @kb.add("q")
+    def _cancel(event):
+        event.app.exit(result=None)
+
+    _style = Style.from_dict({
+        "title":    "fg:cyan bold",
+        "hint":     "fg:ansigray",
+        "selected": "fg:black bg:ansicyan bold",
+        "entry":    "fg:white",
+    })
+
+    app = Application(layout=layout, key_bindings=kb, style=_style, full_screen=True, refresh_interval=0.1)
+    return app.run()
+
 
 def _init_commands():
     cmds = {}

@@ -1177,7 +1177,7 @@ def handle_view_editor(farg: str, provider: dict, model: str, api_key: str, hist
         from pygments.lexers import get_lexer_for_filename
         from pygments.util import ClassNotFound
         try:
-            pt_lexer = PygmentsLexer(get_lexer_for_filename(path))
+            pt_lexer = PygmentsLexer(get_lexer_for_filename(path).__class__)
         except ClassNotFound:
             pt_lexer = None
             
@@ -3066,6 +3066,12 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
     user_input = user_input.strip()
     if not user_input:
         return None
+        
+    if user_input.startswith("ai-"): user_input = "/" + user_input[3:]
+    elif user_input.startswith("d-"): user_input = "/" + user_input[2:]
+    elif user_input.startswith("!!"): user_input = "/" + user_input[2:]
+    elif user_input.startswith("e-"): user_input = "/" + user_input[2:]
+    
     lower = user_input.lower()
 
     # ── Exit / reentrant bridge — blocked when coming from Telegram ────────
@@ -3168,7 +3174,8 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
             print(warn("  No previous user message to retry.\n"))
             return None
         print(c(BBLACK, "  Retrying..."))
-        send_message(prov, mod, key, hist, session["last_user_message"])
+        ensure_ai_ready(session)
+        send_message(session["provider"], session["model"], session["api_key"], hist, session["last_user_message"])
         return None
     if lower == "/copy":
         handle_ai_copy()
@@ -3206,7 +3213,7 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
         if via_telegram:
             print(warn("  Shell passthrough ('!command') isn't available from Telegram for safety.\n"))
             return None
-        handle_terminal(user_input[1:].strip(), prov, mod, key, hist); return None
+        handle_terminal(user_input.split(" ", 1)[1].strip() if " " in user_input else "", prov, mod, key, hist); return None
 
     # ── Terminal AI toggle ────────────────────────────────────────────────────
     if lower == "ai-terminal":
@@ -3217,7 +3224,7 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
     # ── File & folder commands ───────────────────────────────────────────────
     if lower == "/pwd":
         print(f"  {c(BBLUE, os.getcwd())}\n"); return None
-    arg = user_input[5:].strip()
+    arg = user_input.split(" ", 1)[1].strip() if " " in user_input else ""
     if lower == "/cd" or arg in ["!find", "/", "\\/"]: # catch / and !find
         p = get_path_interactively()
         if p: handle_cd(p)
@@ -3225,15 +3232,15 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
     if lower.startswith("/cd "):
         handle_cd(arg); return None
     if lower.startswith("/mkdir "):
-        handle_mkdir(user_input[9:].strip()); return None
+        handle_mkdir(user_input.split(" ", 1)[1].strip() if " " in user_input else ""); return None
     if lower.startswith("/tree"):
-        handle_tree(user_input[7:].strip()); return None
+        handle_tree(user_input.split(" ", 1)[1].strip() if " " in user_input else ""); return None
     if lower.startswith("/ls"):
-        handle_ls(user_input[5:].strip()); return None
+        handle_ls(user_input.split(" ", 1)[1].strip() if " " in user_input else ""); return None
 
     # File actions menu
     if lower.startswith("/file ") or lower == "/file":
-        farg = user_input[8:].strip()
+        farg = user_input.split(" ", 1)[1].strip() if " " in user_input else ""
         if not farg or farg in ["!find", "/", "\\/"]:
             farg = get_path_interactively() or ""
         if farg:
@@ -3241,18 +3248,18 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
         return None
 
     if lower.startswith("/open "):
-        handle_open(user_input[8:].strip()); return None
+        handle_open(user_input.split(" ", 1)[1].strip() if " " in user_input else ""); return None
     if lower.startswith("/close ") or lower == "/close":
-        handle_close(user_input[9:].strip() if lower.startswith("/close ") else ""); return None
+        handle_close(user_input.split(" ", 1)[1].strip() if " " in user_input else "" if lower.startswith("/close ") else ""); return None
     if lower == "/files":
         handle_files_list(); return None
     if lower.startswith("/lang "):
-        handle_lang(user_input[8:].strip()); return None
+        handle_lang(user_input.split(" ", 1)[1].strip() if " " in user_input else ""); return None
 
     # ── Manual in-Termux editor (with AI available inside it) — checked before
     # 'ai-edit' below since "/editor" would otherwise match that prefix first ──
     if lower.startswith("/editor"):
-        farg = user_input[9:].strip()
+        farg = user_input.split(" ", 1)[1].strip() if " " in user_input else ""
         if not farg or farg in ["!find", "/", "\\/"]:
             farg = get_path_interactively() or ""
         if farg:
@@ -3261,11 +3268,11 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
 
     # ── AI editing ────────────────────────────────────────────────────────────
     if lower.startswith("/edit"):
-        handle_edit(prov, mod, key, hist, user_input[7:].strip()); return None
+        handle_edit(prov, mod, key, hist, user_input.split(" ", 1)[1].strip() if " " in user_input else ""); return None
     if lower.startswith("/new"):
-        handle_new(prov, mod, key, hist, user_input[6:].strip()); return None
+        handle_new(prov, mod, key, hist, user_input.split(" ", 1)[1].strip() if " " in user_input else ""); return None
     if lower.startswith("/save-as "):
-        handle_save_as(user_input[11:].strip()); return None
+        handle_save_as(user_input.split(" ", 1)[1].strip() if " " in user_input else ""); return None
 
     # ── Run file ──────────────────────────────────────────────────────────────
     if lower.startswith("/run") or lower.startswith("/run"):
@@ -3309,14 +3316,15 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
             print(warn("  No saved prompts. Use 'ai-save'.\n"))
         return None
     if lower.startswith("/del "):
-        handle_delete_prompt(prompts, user_input[7:].strip()); return None
+        handle_delete_prompt(prompts, user_input.split(" ", 1)[1].strip() if " " in user_input else ""); return None
 
     # Run saved prompt
     if user_input.startswith("-"):
         if user_input in prompts:
             print(c(BBLACK, f"  Running '{user_input}'…"))
             if session["ai_enabled"]:
-                send_message(prov, mod, key, hist, prompts[user_input])
+                ensure_ai_ready(session)
+                send_message(session["provider"], session["model"], session["api_key"], hist, prompts[user_input])
             else:
                 print(dim(f"  (AI off) Prompt: {prompts[user_input]}\n"))
         else:
@@ -3326,7 +3334,8 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
     # ── Default: send to AI ──────────────────────────────────────────────────
     session["last_user_message"] = user_input
     if session["ai_enabled"]:
-        send_message(prov, mod, key, hist, user_input)
+        ensure_ai_ready(session)
+        send_message(session["provider"], session["model"], session["api_key"], hist, user_input)
     else:
         print(dim(f"  [AI off] You said: {user_input}\n"))
     return None

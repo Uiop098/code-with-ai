@@ -2058,6 +2058,11 @@ def handle_view_editor_v3(farg: str, provider: dict, model: str, api_key: str, h
             # Continue.
             continue
         if res == "host_confirm":
+            confirm = input("  Host triggered accidentally? Type START to start hosting (or anything else to cancel): ").strip().upper()
+            if confirm != "START":
+                print(dim("  Hosting cancelled.\n"))
+                continue
+
             root_dir = os.path.commonpath([os.path.dirname(p) for p in EDITOR_PREVIEW_OPEN_ORDER if p]) if EDITOR_PREVIEW_OPEN_ORDER else os.path.dirname(active_path)
             # Auto-detect free-ish port using existing server logic (it will switch if busy).
             # We still try a deterministic starting port so users get stable URLs.

@@ -2004,7 +2004,12 @@ def handle_view_editor_v3(farg: str, provider: dict, model: str, api_key: str, h
                 def _disarm():
                     nonlocal host_armed
                     host_armed = False
-                event.app.create_background_task(_disarm, delay=1.0)
+                # prompt_toolkit 3.0: create_background_task() accepts only a coroutine.
+                # We'll use a timer thread instead of passing delay= (which crashes).
+                def _timer():
+                    time.sleep(1.0)
+                    _disarm()
+                threading.Thread(target=_timer, daemon=True).start()
                 return
             # Second press within window => host.
             host_armed = False

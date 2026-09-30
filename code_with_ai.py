@@ -2015,7 +2015,7 @@ def handle_view_editor_v3(farg: str, provider: dict, model: str, api_key: str, h
             host_armed = False
             if active_path:
                 EDITOR_PREVIEW_CHANGES[active_path] = {"lang": detect_lang(active_path), "content": text_area.text}
-            event.app.exit(result="host")
+            event.app.exit(result="host_confirm")
 
         app = Application(
             layout=Layout(root),
@@ -2057,7 +2057,7 @@ def handle_view_editor_v3(farg: str, provider: dict, model: str, api_key: str, h
             EDITOR_PREVIEW_CHANGES[active_path] = {"lang": detect_lang(active_path), "content": c if ok else ""}
             # Continue.
             continue
-        if res == "host":
+        if res == "host_confirm":
             root_dir = os.path.commonpath([os.path.dirname(p) for p in EDITOR_PREVIEW_OPEN_ORDER if p]) if EDITOR_PREVIEW_OPEN_ORDER else os.path.dirname(active_path)
             # Auto-detect free-ish port using existing server logic (it will switch if busy).
             # We still try a deterministic starting port so users get stable URLs.

@@ -58,7 +58,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.shortcuts import PromptSession
-from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory, AutoSuggest, Suggestion
 from prompt_toolkit.formatted_text import ANSI
 
 
@@ -1813,10 +1813,6 @@ def handle_view_editor_v3(farg: str, provider: dict, model: str, api_key: str, h
 
         # Syntax completer (deterministic, no AI)
         class _LangCompleter(Completer):
-            # NOTE: prompt_toolkit will show completion popup automatically when
-            # complete_while_typing=True. If your device doesn't show the popup,
-            # use Ctrl+Space inside the editor to force refresh.
-            
             _BANKS = {
                 "python": ["def ", "class ", "import ", "from ", "if ", "elif ", "else:", "try:", "except ", "return ", "with ", "as ", "lambda ", "yield ", "raise "],
                 "javascript": ["function ", "const ", "let ", "var ", "class ", "if (", "for (", "while (", "try {", "catch (", "finally {", "export ", "import "],
@@ -1824,6 +1820,7 @@ def handle_view_editor_v3(farg: str, provider: dict, model: str, api_key: str, h
                 "css": ["display: ", "position: ", "top: ", "left: ", "width: ", "height: ", "margin: ", "padding: ", "border: ", "background: ", "color: ", "font-size: ", "flex ", "grid ", "align-items: ", "justify-content: "],
                 "json": ["{", "}", "[", "]", '"key": "value"'],
             }
+
             def get_completions(self, document, complete_event):
                 lang = detect_lang(active_path)
                 bank = self._BANKS.get(lang, [])

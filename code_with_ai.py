@@ -1992,30 +1992,14 @@ def handle_view_editor_v3(farg: str, provider: dict, model: str, api_key: str, h
                     # Exit to rebuild app with new syntax theme.
                     event.app.exit(result="theme")
 
-        # Hosting: avoid accidental trigger on Android keyboards.
-        # Must be done as: Ctrl+H twice quickly.
+        # Hosting: Ctrl+H is mapped to Backspace on some Termux keyboards,
+        # so binding it breaks typing by accidentally triggering server host.
+        # Hosting is still available from the terminal using /serve.
+        # (Ctrl+H in the editor is intentionally a no-op.)
         @kb.add("c-h")
         def _(event):
-            nonlocal host_armed
-            now = time.time()
-            if not host_armed:
-                host_armed = True
-                # Disarm after short window.
-                def _disarm():
-                    nonlocal host_armed
-                    host_armed = False
-                # prompt_toolkit 3.0: create_background_task() accepts only a coroutine.
-                # We'll use a timer thread instead of passing delay= (which crashes).
-                def _timer():
-                    time.sleep(1.0)
-                    _disarm()
-                threading.Thread(target=_timer, daemon=True).start()
-                return
-            # Second press within window => host.
-            host_armed = False
-            if active_path:
-                EDITOR_PREVIEW_CHANGES[active_path] = {"lang": detect_lang(active_path), "content": text_area.text}
-            event.app.exit(result="host_confirm")
+            event.app.invalidate()
+            return
 
         app = Application(
             layout=Layout(root),

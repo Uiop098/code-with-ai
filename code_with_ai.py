@@ -19,7 +19,7 @@ Setup:
 Dependencies used if installed: requests (required), pygments (syntax colors)
 """
 
-import os, sys, re, json, shutil, socket, signal, difflib, getpass, subprocess, textwrap, shlex, time, io, contextlib, zipfile, threading, base64
+import os, sys, re, json, shutil, socket, signal, difflib, getpass, subprocess, textwrap, shlex, time, io, contextlib, zipfile, threading, base64, tempfile, hashlib, uuid
 
 def check_dependencies():
     required = ['requests', 'pygments', 'prompt_toolkit', 'flask', 'telebot']
@@ -211,6 +211,19 @@ def detect_lang(path):
 # Syntax highlighting
 # ═══════════════════════════════════════════════════════════════════════════════
 PYGMENTS_STYLE = "monokai"
+# UI themes for the editor (Ctrl+L → theme slot 0-9)
+EDITOR_THEME_SLOTS = [
+    "monokai",
+    "native",
+    "friendly",
+    "colorful",
+    "emacs",
+    "autumn",
+    "manni",
+    "paraiso-dark",
+    "borland",
+    "fruity",
+]
 
 def syntax_highlight(code: str, lang: str) -> str:
     """Return ANSI-colored code using Pygments, or plain text fallback."""
@@ -247,6 +260,32 @@ def print_code(code: str, lang: str, show_line_nums: bool = True):
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENHANCED: Cryptography for encrypted API key storage
+
+# Editor UI theme persistence
+EDITOR_THEME_CFG = os.path.expanduser("~/.code_ai_editor_theme.json")
+
+def load_editor_theme_slot(default_slot: int = 0) -> int:
+    try:
+        if os.path.exists(EDITOR_THEME_CFG):
+            with open(EDITOR_THEME_CFG, "r", encoding="utf-8") as f:
+                d = json.load(f) or {}
+            slot = int(d.get("slot", default_slot))
+            return slot if 0 <= slot <= 9 else default_slot
+    except Exception:
+        pass
+    return default_slot
+
+
+def save_editor_theme_slot(slot: int):
+    try:
+        slot = int(slot)
+        if slot < 0 or slot > 9:
+            return
+        with open(EDITOR_THEME_CFG, "w", encoding="utf-8") as f:
+            json.dump({"slot": slot}, f)
+    except Exception:
+        pass
+
 # ═══════════════════════════════════════════════════════════════════════════════
 try:
     from cryptography.fernet import Fernet
@@ -395,6 +434,55 @@ attached_files: dict = {}   # abs_path → {"lang": str, "content": str}
 _lang_overrides: dict = {}  # abs_path → lang override
 last_reply: str = ""
 ai_on_terminal: bool = False   # whether to send terminal output to AI automatically
+
+# ── In-editor preview workspace ─────────────────────────────────────────────
+# AI edits done inside the editor are applied to this in-memory preview
+# workspace first (so RUN can use them), and are written to disk only when
+# the user explicitly saves (Ctrl+S, or /save from the terminal).
+EDITOR_PREVIEW_CHANGES: dict = {}  # abs_path -> {"lang": str, "content": str}
+EDITOR_PREVIEW_OPEN_ORDER: list = []  # abs_path ordered for tab/menu UI
+EDITOR_PREVIEW_ACTIVE: str | None = None
+
+
+def _get_lan_ip() -> str | None:
+    """Best-effort LAN IP for instant LAN link printing."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Routing probe; no packets are actually sent.
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and not ip.startswith("127."):
+            return ip
+    except Exception:
+        pass
+    return None
+
+
+def save_editor_preview_changes_to_disk():
+    """Persist pending in-editor preview changes.
+
+    Requirement: AI preview changes are NOT saved automatically; user must
+    explicitly call /save (or press Ctrl+S in-editor).
+    """
+    global EDITOR_PREVIEW_CHANGES, EDITOR_PREVIEW_OPEN_ORDER, EDITOR_PREVIEW_ACTIVE
+
+    if not EDITOR_PREVIEW_CHANGES:
+        print(warn("  No pending editor preview changes to save.\n"))
+        return
+
+    changed_paths = list(EDITOR_PREVIEW_CHANGES.keys())
+    for p in changed_paths:
+        info = EDITOR_PREVIEW_CHANGES.get(p) or {}
+        content = info.get("content", "")
+        lang = info.get("lang") or detect_lang(p)
+        write_text_file(p, content)
+        attached_files[p] = {"lang": lang, "content": content}
+
+    EDITOR_PREVIEW_CHANGES.clear()
+    EDITOR_PREVIEW_OPEN_ORDER = []
+    EDITOR_PREVIEW_ACTIVE = None
+    print(ok("  Saved pending editor preview changes to disk.\n"))
 
 # Request-size limits (fix for hitting a provider's tokens-per-minute cap):
 # only the most recent messages and a capped amount of attached-file content
@@ -1176,7 +1264,13 @@ def _read_multiline_block():
 
 
 def handle_view_editor(farg: str, provider: dict, model: str, api_key: str, history: list, session: dict = None, start_with_ai=False):
-    from prompt_toolkit.widgets import TextArea
+    # Legacy function kept for backward compatibility; real implementation
+    # moved to handle_view_editor_v2.
+    return handle_view_editor_v3(farg, provider, model, api_key, history, session=session, start_with_ai=start_with_ai)
+
+
+def handle_view_editor_v2(farg: str, provider: dict, model: str, api_key: str, history: list, session: dict = None, start_with_ai=False):
+
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.application import Application
     from prompt_toolkit.layout import Layout, HSplit, Window
@@ -1209,6 +1303,14 @@ def handle_view_editor(farg: str, provider: dict, model: str, api_key: str, hist
         )
 
         kb = KeyBindings()
+
+        # Trigger completion manually (if device prevents auto completions)
+        @kb.add("c-space")
+        def _(event):
+            # no-op here: prompt_toolkit handles completion UI from completer
+            event.app.invalidate()
+            return
+
         
         def _add_pair(key, pair):
             @kb.add(key)
@@ -1383,6 +1485,609 @@ def handle_view_editor(farg: str, provider: dict, model: str, api_key: str, hist
                         
             input("\nPress Enter to return to editor...")
 
+
+
+def handle_view_editor_v3(farg: str, provider: dict, model: str, api_key: str, history: list, session: dict = None, start_with_ai=False):
+    """Multi-file prompt_toolkit editor.
+
+    Key features implemented:
+      - Ctrl+M: toggle file tab menu (bottom)
+      - Ctrl+L: theme slot selection (0-9)
+      - Ctrl+H: host current project folder on localhost/LAN
+      - Ctrl+S: persist preview changes to disk
+      - Ctrl+R: RUN using preview (does not auto-save)
+      - Ctrl+A: AI edit writes into preview only (does not auto-save)
+      - Ctrl+X: exit
+
+    Note: This editor is an in-memory preview workspace; AI changes are
+    written to preview first, and only committed to disk on Ctrl+S or /save.
+    """
+
+    from prompt_toolkit.widgets import TextArea
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.layout import Layout, HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.styles import Style
+    from prompt_toolkit.lexers import PygmentsLexer
+    from prompt_toolkit.styles import style_from_pygments_cls, merge_styles
+    from prompt_toolkit.completion import Completer, Completion
+
+    from pygments.lexers import get_lexer_for_filename
+    from pygments.util import ClassNotFound
+    from pygments.styles import get_style_by_name
+
+    # --- helpers ---
+    def _looks_like_path(s: str) -> bool:
+        s = (s or "").strip()
+        if not s:
+            return False
+        if "/" in s or "\\" in s:
+            return True
+        if s.startswith(".") or s.startswith(".."):
+            return True
+        ext = os.path.splitext(s)[1].lower()
+        return ext in EXT_TO_LANG or ext in RUNNERS or ext in (".html", ".htm", ".css", ".js", ".mjs", ".json", ".jsx", ".tsx", ".ts")
+
+    def _resolve_candidate_path(info: str) -> str:
+        # If info is absolute, use it. If it's relative, resolve against
+        # current file's directory.
+        info = info.strip()
+        if os.path.isabs(info):
+            return os.path.abspath(info)
+        base_dir = os.path.dirname(os.path.abspath(farg))
+        return os.path.abspath(os.path.join(base_dir, info))
+
+    def _extract_code_blocks(reply: str) -> dict:
+        """Return mapping abs_path_or_current_None -> code."""
+        mapping = {}
+        if not reply:
+            return mapping
+        blocks = re.findall(r"```([^\n`]*)\n(.*?)```", reply, flags=re.DOTALL)
+        if not blocks:
+            # No fences; treat as replacement for current.
+            mapping[active_path] = extract_code_from_reply(reply)
+            return mapping
+        for info, code in blocks:
+            info = (info or "").strip()
+            code = code.rstrip("\n") + "\n" if code and not code.endswith("\n") else code
+            if _looks_like_path(info):
+                p = _resolve_candidate_path(info)
+                mapping[p] = code
+            else:
+                # Info might be language tag; assume it's current file.
+                mapping[active_path] = code
+        return mapping
+
+    def _effective_content_for(path: str) -> str:
+        if path in EDITOR_PREVIEW_CHANGES:
+            return EDITOR_PREVIEW_CHANGES[path]["content"]
+        ok, content = read_text_file(path)
+        return content if ok else ""
+
+    def _ensure_preview_entry(path: str):
+        abs_p = os.path.abspath(path)
+        if abs_p in EDITOR_PREVIEW_CHANGES:
+            return
+        content = ""
+        ok, c = read_text_file(abs_p)
+        if ok:
+            content = c
+        else:
+            # Create parent dirs if needed for new file.
+            parent = os.path.dirname(abs_p)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+        EDITOR_PREVIEW_CHANGES[abs_p] = {"lang": detect_lang(abs_p), "content": content}
+        if abs_p not in EDITOR_PREVIEW_OPEN_ORDER:
+            EDITOR_PREVIEW_OPEN_ORDER.append(abs_p)
+
+    def _parse_referenced_files(base_path: str) -> list[str]:
+        """Best-effort referenced file discovery for HTML/CSS/JS-like files."""
+        base_abs = os.path.abspath(base_path)
+        base_dir = os.path.dirname(base_abs)
+        ext = os.path.splitext(base_abs)[1].lower()
+        try:
+            ok, content = read_text_file(base_abs)
+        except Exception:
+            ok, content = False, ""
+        if not ok:
+            return []
+        refs = []
+        def _add(rel):
+            if not rel:
+                return
+            rel = rel.strip().strip('"\'')
+            if not rel:
+                return
+            # Ignore external URLs.
+            if rel.startswith("http://") or rel.startswith("https://") or rel.startswith("//"):
+                return
+            # Resolve relative links.
+            p = os.path.abspath(os.path.join(base_dir, rel))
+            refs.append(p)
+
+        if ext in (".html", ".htm", ".vue"):
+            for m in re.finditer(r"<script[^>]*src=[\"']([^\"']+)[\"']", content, flags=re.I):
+                _add(m.group(1))
+            for m in re.finditer(r"<link[^>]*href=[\"']([^\"']+)[\"']", content, flags=re.I):
+                _add(m.group(1))
+        if ext == ".css" or ext == ".scss" or ext == ".sass":
+            for m in re.finditer(r"@import\s+(?:url\(\s*)?[\"']?([^\"'\)]+)[\"']?\s*\)?", content, flags=re.I):
+                _add(m.group(1))
+        if ext in (".js", ".mjs", ".ts", ".tsx", ".jsx"):
+            for m in re.finditer(r"import\s+[^;]*?from\s+[\"']([^\"']+)[\"']", content, flags=re.I):
+                _add(m.group(1))
+            for m in re.finditer(r"require\(\s*[\"']([^\"']+)[\"']\s*\)", content, flags=re.I):
+                _add(m.group(1))
+        # Only keep plausible text sources.
+        uniq = []
+        for p in refs:
+            if p not in uniq:
+                uniq.append(p)
+        return uniq
+
+    def _save_preview_to_current_buffer():
+        if active_path is None:
+            return
+        EDITOR_PREVIEW_CHANGES[active_path] = {
+            "lang": detect_lang(active_path),
+            "content": text_area.text,
+        }
+
+    def _write_preview_to_temp_dir(paths: list[str]) -> tuple[str, str]:
+        # return (temp_root, temp_active_file)
+        if not paths:
+            paths = [active_path]
+        abs_paths = [os.path.abspath(p) for p in paths if p]
+        if not abs_paths:
+            abs_paths = [os.path.abspath(active_path)]
+        common = os.path.commonpath(abs_paths)
+        temp_root = tempfile.mkdtemp(prefix="cwa_editor_preview_", dir=os.path.expanduser("~/.hermes/cache/scratch"))
+        for p in abs_paths:
+            rel = os.path.relpath(p, common)
+            dst = os.path.join(temp_root, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            content = _effective_content_for(p)
+            lang = detect_lang(p)
+            EDITOR_PREVIEW_CHANGES[p] = {"lang": lang, "content": content}
+            with open(dst, "w", encoding="utf-8") as f:
+                f.write(content)
+        rel_active = os.path.relpath(active_path, common)
+        return temp_root, os.path.join(temp_root, rel_active)
+
+    def _run_preview_current():
+        # Execute current file inside a temp directory reflecting preview.
+        preview_paths = list(dict.fromkeys(list(EDITOR_PREVIEW_OPEN_ORDER) + list(EDITOR_PREVIEW_CHANGES.keys())))
+        temp_root, temp_active = _write_preview_to_temp_dir(preview_paths)
+        ext = os.path.splitext(temp_active)[1].lower()
+        cmd = None
+        err_text = ""
+        if ext == ".py": cmd = ["python3", temp_active]
+        elif ext == ".js": cmd = ["node", temp_active]
+        elif ext == ".mjs": cmd = ["node", temp_active]
+        elif ext == ".sh": cmd = ["bash", temp_active]
+        elif ext == ".rb": cmd = ["ruby", temp_active]
+        elif ext in (".c", ".cpp"):
+            import tempfile as _tf
+            cc = "gcc" if ext == ".c" else "g++"
+            fd, tmp = _tf.mkstemp(suffix=".out")
+            os.close(fd)
+            cp = subprocess.run([cc, temp_active, "-o", tmp, "-lm"], capture_output=True, text=True)
+            if cp.returncode == 0:
+                cmd = [tmp]
+            else:
+                err_text = cp.stderr
+        elif ext == ".java": cmd = ["java", temp_active]
+        elif ext == ".go": cmd = ["go", "run", temp_active]
+        elif ext == ".rs":
+            import tempfile as _tf
+            fd, tmp = _tf.mkstemp(suffix=".out")
+            os.close(fd)
+            cp = subprocess.run(["rustc", temp_active, "-o", tmp], capture_output=True, text=True)
+            if cp.returncode == 0:
+                cmd = [tmp]
+            else:
+                err_text = cp.stderr
+        else:
+            cmd = None
+
+        if cmd:
+            print(f"\nExecuting (preview): {' '.join(cmd)}\n")
+            try:
+                p = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
+                if p.stderr:
+                    sys.stdout.write(p.stderr)
+                    sys.stdout.flush()
+                    err_text = p.stderr
+            except KeyboardInterrupt:
+                pass
+        elif not err_text:
+            print("No quick-runner defined for this extension.")
+
+        if err_text:
+            return False, err_text
+        return True, ""
+
+    def _ask_ai_edit_fix(last_err: str = "") -> dict:
+        _prov = session.get("provider") if session else provider
+        _mod = session.get("model") if session else model
+        _key = session.get("api_key") if session else api_key
+        if session:
+            ensure_ai_ready(session)
+
+        # Ensure referenced files are loaded into preview (HTML/CSS/JS imports, links, etc.).
+        try:
+            for rp in _parse_referenced_files(active_path):
+                _ensure_preview_entry(rp)
+        except Exception:
+            pass
+
+        # Provide preview open files as context.
+        files_for_ctx = list(dict.fromkeys(list(EDITOR_PREVIEW_OPEN_ORDER)))
+
+        # Keep prompt bounded (avoid blowing up tokens).
+        ctx_blocks = []
+        used_chars = 0
+        max_chars = MAX_CONTEXT_CHARS
+        for p in files_for_ctx:
+            content = _effective_content_for(p)
+            block = f"File: {p}\n```{detect_lang(p)}\n{content}\n```"
+            if used_chars + len(block) > max_chars:
+                # Try to truncate content in-place for the last block.
+                remaining = max(0, max_chars - used_chars)
+                if remaining <= 0:
+                    break
+                # crude truncation
+                content2 = content[:max(0, remaining - len(f"File: {p}\n```{detect_lang(p)}\n\n```") )] if isinstance(content,str) else ""
+                block = f"File: {p}\n```{detect_lang(p)}\n{content2}\n```"
+            ctx_blocks.append(block)
+            used_chars += len(block)
+            if used_chars >= max_chars:
+                break
+        ctx = "\n\n".join(ctx_blocks)
+
+        if last_err:
+            prompt = (
+                f"We are running these files (current: {active_path}).\n\n"
+                f"Execution error output:\n```\n{last_err[:2000]}\n```\n\n"
+                f"Fix the code. Return ONLY fenced code blocks (```path-or-language\\ncode```), "
+                f"where blocks may target multiple files using their paths (absolute or relative).\n\n"
+                f"Context files:\n\n{ctx}"
+            )
+        else:
+            instr = input(f"\n[AI] What do you want to change in {active_path}? ")
+            instr = instr.strip() if instr else ""
+            if not instr:
+                return {}
+            prompt = (
+                f"We are editing a multi-file project in an IDE preview.\n"
+                f"Task: {instr}\n\n"
+                f"Context files (full contents):\n\n{ctx}\n\n"
+                f"Return ONLY updated code in fenced blocks. Each block's info line must be either: "
+                f"(1) the file path to update, or (2) a language tag to apply to the current file. "
+                f"No explanations, no diffs."
+            )
+        reply = send_message(_prov, _mod, _key, [], prompt, silent=True, include_context=False)
+        if not reply:
+            return {}
+        # Apply via preview: extract blocks to mapping.
+        mapping = _extract_code_blocks(reply)
+        return mapping
+
+    # --- init preview workspace ---
+    EDITOR_PREVIEW_CHANGES.clear()
+    EDITOR_PREVIEW_OPEN_ORDER.clear()
+    EDITOR_PREVIEW_ACTIVE = None
+
+    start_abs = os.path.abspath(farg)
+    initial_files = [start_abs] + _parse_referenced_files(start_abs)
+    # Ensure active first.
+    uniq_files = []
+    for p in initial_files:
+        if p not in uniq_files:
+            uniq_files.append(p)
+
+    for p in uniq_files:
+        _ensure_preview_entry(p)
+
+    # Pick theme
+    theme_slot = load_editor_theme_slot(0)
+
+    active_path = start_abs
+    active_index = EDITOR_PREVIEW_OPEN_ORDER.index(start_abs) if start_abs in EDITOR_PREVIEW_OPEN_ORDER else 0
+
+    while True:
+        # Active file may have moved.
+        active_path = EDITOR_PREVIEW_OPEN_ORDER[active_index]
+        EDITOR_PREVIEW_ACTIVE = active_path
+        # Ensure entry exists
+        _ensure_preview_entry(active_path)
+        content = _effective_content_for(active_path)
+
+        # Build lexer
+        try:
+            pt_lexer = PygmentsLexer(get_lexer_for_filename(active_path).__class__)
+        except ClassNotFound:
+            pt_lexer = None
+
+        # Syntax completer
+        class _LangCompleter(Completer):
+            _BANKS = {
+                "python": ["def ", "class ", "import ", "from ", "if ", "elif ", "else:", "try:", "except ", "return ", "with ", "as ", "lambda ", "yield ", "raise "],
+                "javascript": ["function ", "const ", "let ", "var ", "class ", "if (", "for (", "while (", "try {", "catch (", "finally {", "export ", "import "],
+                "html": ["<!doctype html>", "<html>", "<head>", "<body>", "<div>", "<script>", "<style>", "<link rel=\"stylesheet\" href=\"\">", "<meta charset=\"\" >"],
+                "css": ["display: ", "position: ", "top: ", "left: ", "width: ", "height: ", "margin: ", "padding: ", "border: ", "background: ", "color: ", "font-size: ", "flex ", "grid ", "align-items: ", "justify-content: "],
+                "json": ["{", "}", "[", "]", '"key": "value"'],
+            }
+            def get_completions(self, document, complete_event):
+                lang = detect_lang(active_path)
+                bank = self._BANKS.get(lang, [])
+                word = document.get_word_before_cursor(WORD=True)
+                for s in bank:
+                    if not word or s.lower().startswith(word.lower()):
+                        yield Completion(s, start_position=-len(word) if word else 0, display=s)
+
+        # Style with theme slot: affect syntax colors and chrome.
+        pyg_style_name = EDITOR_THEME_SLOTS[int(theme_slot) % 10]
+        try:
+            pyg_style_cls = get_style_by_name(pyg_style_name)
+            code_style = style_from_pygments_cls(pyg_style_cls)
+        except Exception:
+            code_style = None
+
+        ui_style = Style.from_dict({
+            "status": "fg:ansigray",
+            "title": "fg:cyan bold",
+            "selected": "fg:black bg:ansicyan bold",
+            "entry": "fg:white",
+        })
+        app_style = ui_style
+        if code_style is not None:
+            try:
+                app_style = merge_styles([ui_style, code_style])
+            except Exception:
+                app_style = ui_style
+
+        # Build editor buffer
+        text_area = TextArea(
+            text=content,
+            scrollbar=True,
+            line_numbers=True,
+            lexer=pt_lexer,
+            completer=_LangCompleter(),
+            auto_suggest=None,
+            complete_while_typing=True,
+        )
+
+        # tab menu state
+        tab_menu_open = False
+        tab_selected = active_index
+        theme_menu_open = False
+        host_menu_open = False
+        theme_choice = theme_slot
+
+        def _render_bottom():
+            nonlocal tab_menu_open, tab_selected, theme_menu_open
+            lines = []
+            if tab_menu_open:
+                lines.append(("class:title", " Tabs (Ctrl+M to close) — Enter to switch, Esc to close\n"))
+                for i, p in enumerate(EDITOR_PREVIEW_OPEN_ORDER):
+                    label = os.path.basename(p)
+                    if i == tab_selected:
+                        lines.append(("class:selected", f"  {i}: {label}\n"))
+                    else:
+                        lines.append(("class:entry", f"  {i}: {label}\n"))
+            elif theme_menu_open:
+                lines.append(("class:title", " Theme slot (Ctrl+L) — press 0-9\n"))
+                row = " ".join([str(i) + ("*" if i == theme_choice else "") for i in range(10)])
+                lines.append(("class:entry", row + "\n"))
+            else:
+                changed = "" if not EDITOR_PREVIEW_CHANGES else f" preview:{len(EDITOR_PREVIEW_CHANGES)}"
+                lines.append(("class:status", f" Ctrl+S Save | Ctrl+R Run | Ctrl+A AI edit | Ctrl+M Tabs | Ctrl+L Theme | Ctrl+H Host{changed} | Ctrl+X Exit\n"))
+            return lines
+
+        bottom = Window(height=4, content=FormattedTextControl(_render_bottom), style="")
+        root = HSplit([text_area, bottom])
+
+        kb = KeyBindings()
+
+        # Trigger completion manually (if device prevents auto completions)
+        @kb.add("c-space")
+        def _(event):
+            # no-op here: prompt_toolkit handles completion UI from completer
+            event.app.invalidate()
+            return
+
+
+        @kb.add("c-x")
+        def _(event):
+            # Commit current buffer into preview before exit.
+            if active_path:
+                EDITOR_PREVIEW_CHANGES[active_path] = {"lang": detect_lang(active_path), "content": text_area.text}
+            event.app.exit(result="exit")
+
+        @kb.add("c-s")
+        def _(event):
+            if active_path:
+                EDITOR_PREVIEW_CHANGES[active_path] = {"lang": detect_lang(active_path), "content": text_area.text}
+            event.app.exit(result="save")
+
+        @kb.add("c-r")
+        def _(event):
+            if active_path:
+                EDITOR_PREVIEW_CHANGES[active_path] = {"lang": detect_lang(active_path), "content": text_area.text}
+            event.app.exit(result="run")
+
+        @kb.add("c-a")
+        def _(event):
+            if active_path:
+                EDITOR_PREVIEW_CHANGES[active_path] = {"lang": detect_lang(active_path), "content": text_area.text}
+            event.app.exit(result="ai")
+
+        @kb.add("c-n")
+        def _(event):
+            if active_path:
+                EDITOR_PREVIEW_CHANGES[active_path] = {"lang": detect_lang(active_path), "content": text_area.text}
+            event.app.exit(result="nano")
+
+        @kb.add("c-m")
+        def _(event):
+            nonlocal tab_menu_open
+            tab_menu_open = not tab_menu_open
+
+        @kb.add("escape")
+        def _(event):
+            nonlocal tab_menu_open, theme_menu_open
+            tab_menu_open = False
+            theme_menu_open = False
+
+        @kb.add("up")
+        def _(event):
+            nonlocal tab_selected, tab_menu_open
+            if tab_menu_open:
+                tab_selected = (tab_selected - 1) % max(1, len(EDITOR_PREVIEW_OPEN_ORDER))
+
+        @kb.add("down")
+        def _(event):
+            nonlocal tab_selected, tab_menu_open
+            if tab_menu_open:
+                tab_selected = (tab_selected + 1) % max(1, len(EDITOR_PREVIEW_OPEN_ORDER))
+
+        @kb.add("enter")
+        def _(event):
+            nonlocal tab_menu_open, tab_selected, active_index
+            if tab_menu_open:
+                active_index = tab_selected
+                tab_menu_open = False
+                event.app.exit(result="switch")
+
+        @kb.add("c-l")
+        def _(event):
+            nonlocal theme_menu_open
+            theme_menu_open = not theme_menu_open
+
+        # digits for theme selection
+        for i in range(10):
+            key = str(i)
+
+            @kb.add(key)
+            def _(event, i=i):
+                nonlocal theme_choice, theme_menu_open, theme_slot
+                if theme_menu_open:
+                    theme_choice = i
+                    theme_slot = i
+                    # Persist theme for future sessions.
+                    save_editor_theme_slot(theme_slot)
+                    # Exit to rebuild app with new syntax theme.
+                    event.app.exit(result="theme")
+
+        @kb.add("c-h")
+        def _(event):
+            if active_path:
+                EDITOR_PREVIEW_CHANGES[active_path] = {"lang": detect_lang(active_path), "content": text_area.text}
+            event.app.exit(result="host")
+
+        app = Application(
+            layout=Layout(root),
+            key_bindings=kb,
+            full_screen=True,
+            mouse_support=True,
+            style=app_style,
+        )
+
+        # Optionally jump directly to AI edit.
+        if start_with_ai:
+            start_with_ai = False
+            # Store and trigger AI after UI closes (we just exit UI immediately).
+            return None
+
+        res = app.run()
+
+        if res == "exit":
+            break
+        if res == "switch":
+            # Tab switched; just rebuild with new active file.
+            continue
+        if res == "theme":
+            # Continue loop; rebuild app.
+            continue
+        if res == "save":
+            save_editor_preview_changes_to_disk()
+            # After save, keep editing.
+            continue
+        if res == "nano":
+            # Persist only current file into disk for external nano.
+            try:
+                write_text_file(active_path, text_area.text)
+            except Exception:
+                pass
+            os.system(f"nano '{active_path}'")
+            # Reload current content into preview.
+            ok, c = read_text_file(active_path)
+            EDITOR_PREVIEW_CHANGES[active_path] = {"lang": detect_lang(active_path), "content": c if ok else ""}
+            # Continue.
+            continue
+        if res == "host":
+            root_dir = os.path.commonpath([os.path.dirname(p) for p in EDITOR_PREVIEW_OPEN_ORDER if p]) if EDITOR_PREVIEW_OPEN_ORDER else os.path.dirname(active_path)
+            # Auto-detect free-ish port using existing server logic (it will switch if busy).
+            # We still try a deterministic starting port so users get stable URLs.
+            start_port = 8080 + (abs(hash(root_dir)) % 2000)
+
+            lan_ip = _get_lan_ip() or ""
+            # Bind only to localhost by default so we don't surprise-expose.
+            # Requirement says: localhost link + LAN address instantly upon start.
+            # We'll start on 127.0.0.1 and additionally print the LAN IP address.
+            host = "127.0.0.1"
+            handle_serve(f"{root_dir} :{start_port} {host}")
+
+            if lan_ip:
+                print(dim(f"  LAN address: http://{lan_ip}:{start_port} (if reachable on your Wi‑Fi)\n"))
+            else:
+                print(dim("  LAN address: (could not detect LAN IP automatically)\n"))
+
+            # Optional public tunnel (manual fallback).
+            try:
+                tun = input("  Optional: start a public tunnel link? [y/N]: ").strip().lower()
+            except Exception:
+                tun = ""
+            if tun in ("y", "yes"):
+                print(warn("  Tunnel auto-start isn't fully automated here. If you have ngrok/cloudflared,")
+                      + warn(" run it separately, then share the public URL.\n"))
+            continue
+        if res == "run":
+            ok_run, err_text = _run_preview_current()
+            if ok_run:
+                input("\nPress Enter to return to editor...")
+                continue
+            # If run failed, offer AI fix but only into preview.
+            ans = input("\n[Command failed] Ask AI to analyze and fix? [Y/n]: ").strip().lower()
+            if ans in ("", "y", "yes"):
+                mapping = _ask_ai_edit_fix(err_text)
+                for p, code in mapping.items():
+                    abs_p = os.path.abspath(p)
+                    EDITOR_PREVIEW_CHANGES[abs_p] = {"lang": detect_lang(abs_p), "content": code}
+                    if abs_p not in EDITOR_PREVIEW_OPEN_ORDER:
+                        EDITOR_PREVIEW_OPEN_ORDER.append(abs_p)
+                input("\nAI applied fixes to preview. Press Enter to re-run...")
+                continue
+            input("\nPress Enter to return to editor...")
+            continue
+        if res == "ai":
+            # AI edit into preview.
+            mapping = _ask_ai_edit_fix("")
+            for p, code in mapping.items():
+                abs_p = os.path.abspath(p)
+                EDITOR_PREVIEW_CHANGES[abs_p] = {"lang": detect_lang(abs_p), "content": code}
+                if abs_p not in EDITOR_PREVIEW_OPEN_ORDER:
+                    EDITOR_PREVIEW_OPEN_ORDER.append(abs_p)
+            # Switch editor to active_path if it got removed (it won't).
+            input("\nAI applied edits to preview. Press Enter to continue editing...")
+            # Keep current active_index.
+            continue
+
+    # On exit, keep preview changes in memory until user explicitly /save.
+    return
 
 
 def handle_view_raw(path: str):
@@ -3326,8 +4031,14 @@ def dispatch_command(user_input: str, session: dict, prompts: dict, via_telegram
             return None
         handle_tbot_token(session, user_input[len("/tbot-token"):].strip()); return None
 
-    # ── Saved prompts ─────────────────────────────────────────────────────────
+    # ── Saved prompts / editor preview save ─────────────────────────────────
     if lower == "/save":
+        # If the in-editor AI preview workspace has pending changes, /save
+        # commits them to disk. Otherwise, /save behaves like the original
+        # "save a reusable prompt" command.
+        if EDITOR_PREVIEW_CHANGES:
+            save_editor_preview_changes_to_disk()
+            return None
         handle_save_prompt(prompts); return None
     if lower == "/list":
         if prompts:
@@ -3585,6 +4296,8 @@ def get_path_interactively(start_path="."):
     text_ctrl = FormattedTextControl(get_formatted_text)
     layout = Layout(HSplit([Window(content=text_ctrl)]))
     kb = KeyBindings()
+
+    @kb.add("up")
 
     @kb.add("up")
     def _up(event):

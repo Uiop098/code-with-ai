@@ -1811,8 +1811,12 @@ def handle_view_editor_v3(farg: str, provider: dict, model: str, api_key: str, h
         except ClassNotFound:
             pt_lexer = None
 
-        # Syntax completer
+        # Syntax completer (deterministic, no AI)
         class _LangCompleter(Completer):
+            # NOTE: prompt_toolkit will show completion popup automatically when
+            # complete_while_typing=True. If your device doesn't show the popup,
+            # use Ctrl+Space inside the editor to force refresh.
+            
             _BANKS = {
                 "python": ["def ", "class ", "import ", "from ", "if ", "elif ", "else:", "try:", "except ", "return ", "with ", "as ", "lambda ", "yield ", "raise "],
                 "javascript": ["function ", "const ", "let ", "var ", "class ", "if (", "for (", "while (", "try {", "catch (", "finally {", "export ", "import "],
@@ -1856,7 +1860,7 @@ def handle_view_editor_v3(farg: str, provider: dict, model: str, api_key: str, h
             line_numbers=True,
             lexer=pt_lexer,
             completer=_LangCompleter(),
-            auto_suggest=None,
+            auto_suggest=AutoSuggestFromHistory(),
             complete_while_typing=True,
         )
 
@@ -1961,6 +1965,14 @@ def handle_view_editor_v3(farg: str, provider: dict, model: str, api_key: str, h
                 active_index = tab_selected
                 tab_menu_open = False
                 event.app.exit(result="switch")
+
+        # Manual completion trigger (some Termux keyboards don't reliably
+        # show the completion popup automatically).
+        @kb.add("c-space")
+        def _(event):
+            event.app.invalidate()
+            return
+
 
         @kb.add("c-l")
         def _(event):

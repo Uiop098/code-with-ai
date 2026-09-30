@@ -1867,6 +1867,7 @@ def handle_view_editor_v3(farg: str, provider: dict, model: str, api_key: str, h
         theme_menu_open = False
         host_menu_open = False
         theme_choice = theme_slot
+        host_armed = False
 
         def _render_bottom():
             nonlocal tab_menu_open, tab_selected, theme_menu_open
@@ -1991,8 +1992,22 @@ def handle_view_editor_v3(farg: str, provider: dict, model: str, api_key: str, h
                     # Exit to rebuild app with new syntax theme.
                     event.app.exit(result="theme")
 
+        # Hosting: avoid accidental trigger on Android keyboards.
+        # Must be done as: Ctrl+H twice quickly.
         @kb.add("c-h")
         def _(event):
+            nonlocal host_armed
+            now = time.time()
+            if not host_armed:
+                host_armed = True
+                # Disarm after short window.
+                def _disarm():
+                    nonlocal host_armed
+                    host_armed = False
+                event.app.create_background_task(_disarm, delay=1.0)
+                return
+            # Second press within window => host.
+            host_armed = False
             if active_path:
                 EDITOR_PREVIEW_CHANGES[active_path] = {"lang": detect_lang(active_path), "content": text_area.text}
             event.app.exit(result="host")
